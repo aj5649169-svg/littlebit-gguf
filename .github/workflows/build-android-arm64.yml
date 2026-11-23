@@ -26,17 +26,30 @@ jobs:
         run: bash scripts/build-android.sh
       - name: Verify packaged binaries
         run: |
-          for binary in \
-            dist/littlebit-gguf-android-arm64/bin/llama-cli \
-            dist/littlebit-gguf-android-arm64/bin/llama-bench
-          do
+          dist=dist/littlebit-gguf-android-arm64
+          app_bin=
+          for name in llama llama-app; do
+            if [[ -x "$dist/bin/$name" ]]; then
+              app_bin="$dist/bin/$name"
+              break
+            fi
+          done
+          if [[ -z "$app_bin" ]]; then
+            echo "No llama or llama-app binary found in $dist/bin" >&2
+            exit 1
+          fi
+          if [[ ! -x "$dist/bin/llama-bench" ]]; then
+            echo "No llama-bench binary found in $dist/bin" >&2
+            exit 1
+          fi
+          while IFS= read -r -d '' binary; do
             description="$(file -b "$binary")"
             printf '%s: %s\n' "$binary" "$description"
             [[ "$description" == *"ELF 64-bit"* \
               && "$description" == *"ARM aarch64"* \
               && "$description" == *"executable"* ]]
-          done
-          ls -lR dist/littlebit-gguf-android-arm64
+          done < <(find "$dist/bin" -maxdepth 1 -type f -executable -print0)
+          ls -lR "$dist"
       - uses: actions/upload-artifact@v4
         with:
           name: littlebit-gguf-android-arm64
