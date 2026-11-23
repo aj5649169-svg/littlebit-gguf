@@ -1,0 +1,44 @@
+name: Android arm64
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Ninja if needed
+        run: |
+          if ! command -v ninja >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ninja-build
+          fi
+      - name: Build Android arm64 binaries
+        run: bash scripts/build-android.sh
+      - name: Verify packaged binaries
+        run: |
+          for binary in \
+            dist/littlebit-gguf-android-arm64/bin/llama-cli \
+            dist/littlebit-gguf-android-arm64/bin/llama-bench
+          do
+            description="$(file -b "$binary")"
+            printf '%s: %s\n' "$binary" "$description"
+            [[ "$description" == *"ELF 64-bit"* \
+              && "$description" == *"ARM aarch64"* \
+              && "$description" == *"executable"* ]]
+          done
+          ls -lR dist/littlebit-gguf-android-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: littlebit-gguf-android-arm64
+          path: dist/littlebit-gguf-android-arm64.tar.gz
+          if-no-files-found: error
