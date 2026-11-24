@@ -51,8 +51,9 @@ cmake -S "$llama" -B "$build_dir" "${generator[@]}" \
     -DLLAMA_CURL=OFF \
     -DLLAMA_BUILD_TESTS=OFF \
     -DLLAMA_BUILD_EXAMPLES=ON \
-    -DLLAMA_BUILD_SERVER=OFF
-cmake --build "$build_dir" --parallel "${LITTLEBIT_JOBS:-2}" --target llama-app
+    -DLLAMA_BUILD_SERVER=OFF \
+    -DLLAMA_BUILD_APP=OFF
+cmake --build "$build_dir" --parallel "${LITTLEBIT_JOBS:-2}" --target llama-completion
 cmake --build "$build_dir" --parallel "${LITTLEBIT_JOBS:-2}" --target llama-bench
 
 dist_dir="$PWD/dist/littlebit-gguf-android-arm64"
@@ -70,15 +71,8 @@ install_output() {
     install -m 755 "$source" "$dist_dir/bin/$name"
 }
 
-app_binary=
-for name in llama llama-app; do
-    if install_output "$build_dir/bin/$name" "$name"; then
-        app_binary=$name
-        break
-    fi
-done
-if [[ -z "$app_binary" ]]; then
-    echo "Built llama-app, but found no output binary at $build_dir/bin/llama or $build_dir/bin/llama-app" >&2
+if ! install_output "$build_dir/bin/llama-completion" llama-completion; then
+    echo "Missing built binary: $build_dir/bin/llama-completion" >&2
     exit 1
 fi
 if ! install_output "$build_dir/bin/llama-bench" llama-bench; then
@@ -117,12 +111,12 @@ if [[ "$needs_cxx_shared" == true ]]; then
     cp -a "$cxx_shared" "$lib_dir/"
 fi
 
-cat > "$dist_dir/run-android.sh" <<WRAPPER
+cat > "$dist_dir/run-android.sh" <<'WRAPPER'
 #!/usr/bin/env sh
 set -eu
-script_dir=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
-export LD_LIBRARY_PATH="\$script_dir/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
-exec "\$script_dir/bin/$app_binary" "\$@"
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export LD_LIBRARY_PATH="$script_dir/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$script_dir/bin/llama-completion" "$@"
 WRAPPER
 chmod 755 "$dist_dir/run-android.sh"
 
