@@ -47,7 +47,14 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -85,23 +92,27 @@ fun ChatScreen(
     onOpenSettings: () -> Unit,
 ) {
     val listState = rememberLazyListState()
-    val isAtBottom by remember { derivedStateOf { !listState.canScrollForward } }
     var autoScrollEnabled by remember { mutableStateOf(true) }
+    var touchingList by remember { mutableStateOf(false) }
+    val manualScroll = remember(listState) {
+        object : NestedScrollConnection {
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                // Track the position after actual drag/fling movement. Content
+                // growth alone can move the sentinel without changing intent.
+                if (consumed.y != 0f) autoScrollEnabled = !listState.canScrollForward
+                return Offset.Zero
+            }
+        }
+    }
     val totalItemCount =
         (if (vm.chatError != null) 1 else 0) +
             vm.currentMessages.size +
             (if (vm.streamActive) 1 else 0) +
             (if (vm.currentMessages.isEmpty() && !vm.streamActive) 1 else 0) + 1
 
-    LaunchedEffect(listState.isScrollInProgress, isAtBottom) {
-        if (listState.isScrollInProgress && !isAtBottom) {
-            autoScrollEnabled = false
-        } else if (isAtBottom) {
-            autoScrollEnabled = true
-        }
-    }
-    LaunchedEffect(totalItemCount, vm.rawStream.length, autoScrollEnabled) {
-        if (autoScrollEnabled && !listState.isScrollInProgress && totalItemCount > 0) {
+    val scrolling = listState.isScrollInProgress
+    LaunchedEffect(totalItemCount, vm.rawStream.length, autoScrollEnabled, touchingList, scrolling) {
+        if (autoScrollEnabled && !touchingList && !listState.isScrollInProgress) {
             listState.scrollToItem(totalItemCount - 1)
         }
     }
@@ -138,7 +149,21 @@ fun ChatScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(horizontal = 12.dp),
+                .padding(horizontal = 12.dp)
+                .nestedScroll(manualScroll)
+                .pointerInput(listState) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        touchingList = true
+                        try {
+                            do {
+                                val event = awaitPointerEvent(PointerEventPass.Final)
+                            } while (event.changes.any { it.pressed })
+                        } finally {
+                            touchingList = false
+                        }
+                    }
+                },
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             if (vm.chatError != null) {

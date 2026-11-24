@@ -81,6 +81,12 @@ if(ANDROID)
         message(FATAL_ERROR "Modern host glslc missing: set VULKAN_GLSLC_EXECUTABLE to SDK glslc.")
     endif()
 
+    # ggml requires the header-only CMake package. Search the host SDK or
+    # distro package outside the Android sysroot, then use matching SDK headers.
+    find_package(SPIRV-Headers CONFIG REQUIRED HINTS "$ENV{VULKAN_SDK}"
+        NO_CMAKE_FIND_ROOT_PATH)
+    set(GGML_VULKAN_SPIRV_INCLUDE_DIR "${Vulkan_INCLUDE_DIR}")
+
     if(Vulkan_LIBRARY AND EXISTS "${Vulkan_LIBRARY}")
         set(ANDROID_VULKAN_LIBRARY "${Vulkan_LIBRARY}")
     else()

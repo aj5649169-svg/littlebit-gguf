@@ -29,6 +29,8 @@ android {
                     "-DGGML_VULKAN=ON",
                 )
                 val vulkanSdk = System.getenv("VULKAN_SDK")
+                val vulkanInclude = System.getenv("VULKAN_INCLUDE_DIR")
+                    ?: vulkanSdk?.let { "$it/include" }
                 val glslc = System.getenv("VULKAN_GLSLC_EXECUTABLE")
                     ?: vulkanSdk?.let { "$it/bin/glslc" }
                 val ndkRoot = System.getenv("ANDROID_NDK_HOME")
@@ -41,8 +43,8 @@ android {
                 val ndkSysroot = ndkRoot?.let {
                     "$it/toolchains/llvm/prebuilt/$ndkHost/sysroot"
                 }
-                if (vulkanSdk != null) {
-                    arguments += "-DVulkan_INCLUDE_DIR=$vulkanSdk/include"
+                if (vulkanInclude != null) {
+                    arguments += "-DVulkan_INCLUDE_DIR=$vulkanInclude"
                 }
                 if (glslc != null) {
                     arguments += "-DVulkan_GLSLC_EXECUTABLE=$glslc"

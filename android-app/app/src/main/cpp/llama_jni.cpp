@@ -618,10 +618,9 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
 
     try {
         e->stop.store(false);
-        if (!e->pending_utf8.empty() && !flushUtf8Tail(env, cb, e->pending_utf8)) {
-            env->DeleteGlobalRef(cb);
-            return -1;
-        }
+        // A fresh prompt owns a fresh byte stream. Only a same-turn
+        // nativeContinueGenerate may finish a code point from the prior call.
+        e->pending_utf8.clear();
         const std::string prompt = toStdString(env, jprompt);
         const int n_ctx   = static_cast<int>(llama_n_ctx(e->ctx));
         const int n_batch = static_cast<int>(llama_n_batch(e->ctx));

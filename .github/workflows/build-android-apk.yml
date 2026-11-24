@@ -47,13 +47,14 @@ jobs:
       - name: Install modern host Vulkan SDK (glslc + SPIRV-Headers)
         run: |
           sudo apt-get update
-          sudo apt-get install -y xz-utils build-essential
+          sudo apt-get install -y xz-utils build-essential spirv-headers
           mkdir -p "$RUNNER_TEMP/vulkan-sdk"
           curl -fL "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/vulkan_sdk.tar.xz" \
             -o "$RUNNER_TEMP/vulkan-sdk/vulkan_sdk.tar.xz"
           echo "${VULKAN_SDK_SHA256}  $RUNNER_TEMP/vulkan-sdk/vulkan_sdk.tar.xz" | sha256sum --check
           tar -xf "$RUNNER_TEMP/vulkan-sdk/vulkan_sdk.tar.xz" -C "$RUNNER_TEMP/vulkan-sdk"
           echo "VULKAN_SDK=$RUNNER_TEMP/vulkan-sdk/${VULKAN_SDK_VERSION}/x86_64" >> "$GITHUB_ENV"
+          echo "VULKAN_INCLUDE_DIR=$RUNNER_TEMP/vulkan-sdk/${VULKAN_SDK_VERSION}/x86_64/include" >> "$GITHUB_ENV"
           echo "VULKAN_GLSLC_EXECUTABLE=$RUNNER_TEMP/vulkan-sdk/${VULKAN_SDK_VERSION}/x86_64/bin/glslc" >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/vulkan-sdk/${VULKAN_SDK_VERSION}/x86_64/bin" >> "$GITHUB_PATH"
           echo "CMAKE_PREFIX_PATH=$RUNNER_TEMP/vulkan-sdk/${VULKAN_SDK_VERSION}/x86_64:$RUNNER_TEMP/vulkan-sdk/${VULKAN_SDK_VERSION}/x86_64/lib/VulkanLoader" >> "$GITHUB_ENV"
