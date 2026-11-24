@@ -1,5 +1,15 @@
 package com.littlebit.chat.ui
 
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -38,6 +48,10 @@ import androidx.compose.ui.unit.sp
  */
 
 private sealed interface MdBlock {
+    data class Heading(val level: Int, val text: String) : MdBlock
+    data class Quote(val text: String) : MdBlock
+    data object Rule : MdBlock
+    data class Table(val rows: List<List<String>>) : MdBlock
     data class Paragraph(val text: String) : MdBlock
     data class Bullets(val items: List<String>) : MdBlock
     data class Code(val lang: String, val code: String) : MdBlock
@@ -64,7 +78,10 @@ private fun parseMarkdown(text: String): List<MdBlock> {
         bullets = mutableListOf()
     }
 
-    for (line in lines) {
+    var row = 0
+    fun cells(line: String) = line.trim().trim('|').split('|').map { it.trim() }
+    while (row < lines.size) {
+        val line = lines[row++]
         if (line.trim().startsWith("```")) {
             if (inCode) {
                 blocks.add(MdBlock.Code(codeLang, code.toString().trimEnd()))
@@ -114,6 +131,33 @@ private fun parseMarkdown(text: String): List<MdBlock> {
                 inMath = true
                 math.append(expression.trim())
             }
+            continue
+        }
+        val heading = Regex("""^(#{1,3})\s+(.+)""").matchEntire(trimmed)
+        if (heading != null || trimmed.startsWith(">") || trimmed == "---") {
+            flushParagraph()
+            flushBullets()
+            blocks.add(when {
+                heading != null -> MdBlock.Heading(heading.groupValues[1].length, heading.groupValues[2])
+                trimmed == "---" -> MdBlock.Rule
+                else -> MdBlock.Quote(trimmed.drop(1).trimStart())
+            })
+            continue
+        }
+        if ('|' in trimmed && row < lines.size && '|' in lines[row] &&
+            cells(lines[row]).all { it.matches(Regex(":?-{3,}:?")) }) {
+            flushParagraph()
+            flushBullets()
+            val rows = mutableListOf(cells(trimmed))
+            row++
+            while (row < lines.size && '|' in lines[row]) rows.add(cells(lines[row++]))
+            blocks.add(MdBlock.Table(rows))
+            continue
+        }
+        if (Regex("""^\d+[.)]\s+.+""").matches(trimmed)) {
+            flushParagraph()
+            flushBullets()
+            blocks.add(MdBlock.Paragraph(trimmed))
             continue
         }
         val bulletMatch = Regex("^\\s*[-*•]\\s+(.*)$").find(line)
@@ -224,6 +268,21 @@ private fun inlineMarkdown(text: String, baseColor: Color, codeBg: Color): Annot
     }
 
 @Composable
+private fun linked(text: String, color: Color, background: Color): AnnotatedString {
+    val formatted = inlineMarkdown(text, color, background)
+    val uri = androidx.compose.ui.platform.LocalUriHandler.current
+    val style = TextLinkStyles(SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = TextDecoration.Underline))
+    return buildAnnotatedString {
+        append(formatted)
+        Regex("""https?://[^\s<>]+""").findAll(formatted.text).forEach { match ->
+            val url = match.value.trimEnd('.', ',', ')', ']')
+            addLink(LinkAnnotation.Url(url, style) { runCatching { uri.openUri(url) } },
+                match.range.first, match.range.first + url.length)
+        }
+    }
+}
+
+@Composable
 fun MarkdownText(
     text: String,
     modifier: Modifier = Modifier,
@@ -235,7 +294,7 @@ fun MarkdownText(
         for (block in blocks) {
             when (block) {
                 is MdBlock.Paragraph -> Text(
-                    text = inlineMarkdown(block.text, color, codeBg),
+                    text = linked(block.text, color, codeBg),
                     style = MaterialTheme.typography.bodyLarge,
                     color = color,
                 )
@@ -248,12 +307,29 @@ fun MarkdownText(
                                 color = color,
                             )
                             Text(
-                                text = inlineMarkdown(item, color, codeBg),
+                                text = linked(item, color, codeBg),
                                 style = MaterialTheme.typography.bodyLarge,
                                 color = color,
                                 modifier = Modifier.weight(1f),
                             )
                         }
+                    }
+                }
+                is MdBlock.Heading -> Text(linked(block.text, color, codeBg), style = when (block.level) {
+                    1 -> MaterialTheme.typography.headlineSmall
+                    2 -> MaterialTheme.typography.titleLarge
+                    else -> MaterialTheme.typography.titleMedium
+                })
+                is MdBlock.Quote -> Row(Modifier.height(IntrinsicSize.Min).padding(vertical = 4.dp)) {
+                    Box(Modifier.width(3.dp).fillMaxHeight().background(MaterialTheme.colorScheme.primary))
+                    Text(linked(block.text, color, codeBg), Modifier.padding(start = 10.dp))
+                }
+                MdBlock.Rule -> androidx.compose.material3.HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                is MdBlock.Table -> Column(Modifier.horizontalScroll(rememberScrollState())) {
+                    for ((index, row) in block.rows.withIndex()) Row {
+                        for (cell in row) Text(linked(cell, color, codeBg),
+                            Modifier.width(144.dp).padding(6.dp),
+                            fontWeight = if (index == 0) FontWeight.Bold else FontWeight.Normal)
                     }
                 }
                 is MdBlock.Code -> CodeBlock(block.lang, block.code)
@@ -309,6 +385,7 @@ private fun MathBlock(expression: String) {
 @Composable
 private fun CodeBlock(lang: String, code: String) {
     val clipboard = LocalClipboardManager.current
+    val buzz = hapticAction()
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(12.dp),
@@ -330,7 +407,7 @@ private fun CodeBlock(lang: String, code: String) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f),
                 )
-                IconButton(onClick = { clipboard.setText(AnnotatedString(code)) }) {
+                IconButton(onClick = { buzz(); clipboard.setText(AnnotatedString(code)) }) {
                     Icon(
                         Icons.Default.ContentCopy,
                         contentDescription = "Copy code",
@@ -340,10 +417,11 @@ private fun CodeBlock(lang: String, code: String) {
             }
             Text(
                 text = code,
+                softWrap = false,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 13.sp,
                 color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 10.dp),
             )
         }
     }

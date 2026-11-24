@@ -24,10 +24,12 @@ class LlamaEngine {
 
     data class SamplingParams(
         val temperature: Double = 0.7,
-        val topK: Int = 0,               // 0 = disabled
+        val topP: Double = 0.90,
+        val minP: Double = 0.05,
+        val topK: Int = 40,               // 0 = disabled
         val repeatPenalty: Double = 1.1,
         val dryMultiplier: Double = 0.0, // 0 = disabled
-        val maxTokens: Int = 512,
+        val maxTokens: Int = 1024,
         val seed: Long = -1,             // <0 = random
     )
 
@@ -36,6 +38,7 @@ class LlamaEngine {
         val tokens: Int,
         val tokensPerSec: Double,
         val output: String,
+        val error: String? = null,
     ) {
         val isStopped get() = status == STATUS_STOPPED
         val isContextFull get() = status == STATUS_CONTEXT_FULL
@@ -58,7 +61,7 @@ class LlamaEngine {
         fun onError(message: String)
     }
 
-    private var handle: Long = 0
+    @Volatile private var handle: Long = 0
 
     val isLoaded: Boolean get() = handle != 0L
 
@@ -79,10 +82,12 @@ class LlamaEngine {
         contextSize: Int = 4096,
         threads: Int = 4,
         nGpuLayers: Int = 0,
+        batch: Int = 512,
+        flash: Boolean = false,
         onProgress: ProgressCallback? = null,
     ): ModelInfo {
         check(handle == 0L) { "A model is already loaded. Unload it first." }
-        val h = LlamaJni.nativeLoadModel(path, contextSize, threads, 512, nGpuLayers, onProgress)
+        val h = LlamaJni.nativeLoadModel(path, contextSize, threads, batch, nGpuLayers, flash, onProgress)
         check(h != 0L) { "nativeLoadModel returned 0" }
         handle = h
         return ModelInfo(
@@ -93,11 +98,15 @@ class LlamaEngine {
         )
     }
 
+    fun metrics() = LlamaJni.nativeMetrics(handle)
+    fun reset() = LlamaJni.nativeReset(handle)
+    fun promptSize(prompt: String) = LlamaJni.nativePromptSize(handle, prompt)
+
     fun setThreads(threads: Int) {
         if (handle != 0L) LlamaJni.nativeSetThreads(handle, threads)
     }
 
-    fun unload() {
+    @Synchronized fun unload() {
         val h = handle
         if (h != 0L) {
             LlamaJni.nativeUnload(h)
@@ -106,7 +115,7 @@ class LlamaEngine {
     }
 
     /** Signal the native loop to stop at the next token. Safe to call anytime. */
-    fun stop() {
+    @Synchronized fun stop() {
         if (handle != 0L) LlamaJni.nativeStop(handle)
     }
 
@@ -143,6 +152,7 @@ class LlamaEngine {
         check(handle != 0L) { "No model loaded" }
         isGenerating = true
         return try {
+            var error: String? = null
             val output = StringBuilder()
             var tokens = 0
             var tps = 0.0
@@ -159,23 +169,23 @@ class LlamaEngine {
                 }
 
                 override fun onError(message: String) {
-                    // Surfaced through the result status / partial output.
+                    error = message
                 }
             }
             val status = if (prompt == null) {
                 LlamaJni.nativeContinueGenerate(
                     handle,
-                    params.temperature, params.topK, params.repeatPenalty, params.dryMultiplier,
+                    params.temperature, params.topK, params.topP, params.minP, params.repeatPenalty, params.dryMultiplier,
                     params.maxTokens, params.seed, cb,
                 )
             } else {
                 LlamaJni.nativeGenerate(
                     handle, prompt,
-                    params.temperature, params.topK, params.repeatPenalty, params.dryMultiplier,
+                    params.temperature, params.topK, params.topP, params.minP, params.repeatPenalty, params.dryMultiplier,
                     params.maxTokens, params.seed, cb,
                 )
             }
-            GenerateResult(status, tokens, tps, output.toString())
+            GenerateResult(status, tokens, tps, output.toString(), error)
         } finally {
             isGenerating = false
         }

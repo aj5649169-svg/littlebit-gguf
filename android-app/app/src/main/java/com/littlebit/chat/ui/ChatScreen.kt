@@ -1,5 +1,11 @@
 package com.littlebit.chat.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -92,9 +98,9 @@ fun ChatScreen(
     onOpenSettings: () -> Unit,
 ) {
     val listState = rememberLazyListState()
-    var autoScrollEnabled by remember { mutableStateOf(true) }
+    var autoScrollEnabled by remember(vm.currentSession?.id) { mutableStateOf(true) }
     var touchingList by remember { mutableStateOf(false) }
-    val manualScroll = remember(listState) {
+    val manualScroll = remember(listState, vm.currentSession?.id) {
         object : NestedScrollConnection {
             override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
                 // Track the position after actual drag/fling movement. Content
@@ -111,14 +117,25 @@ fun ChatScreen(
             (if (vm.currentMessages.isEmpty() && !vm.streamActive) 1 else 0) + 1
 
     val scrolling = listState.isScrollInProgress
-    LaunchedEffect(totalItemCount, vm.rawStream.length, autoScrollEnabled, touchingList, scrolling) {
+    LaunchedEffect(vm.currentSession?.id, totalItemCount, vm.rawStream.length, autoScrollEnabled, touchingList, scrolling) {
         if (autoScrollEnabled && !touchingList && !listState.isScrollInProgress) {
             listState.scrollToItem(totalItemCount - 1)
         }
     }
 
+    val scrollScope = rememberCoroutineScope()
+    var actionIndex by remember(vm.currentSession?.id) { mutableStateOf<Int?>(null) }
+    val buzz = hapticAction()
+    actionIndex?.let { MessageActions(vm, it) { actionIndex = null } }
     Scaffold(
-        topBar = {
+        floatingActionButton = {
+            if (vm.streamActive && !autoScrollEnabled) {
+                androidx.compose.material3.SmallFloatingActionButton(onClick = {
+                    autoScrollEnabled = true
+                    scrollScope.launch { listState.scrollToItem(totalItemCount - 1) }
+                }) { Icon(Icons.Default.KeyboardArrowDown, "Jump to bottom") }
+            }
+        },        topBar = {
             CenterAlignedTopAppBar(
                 title = {
                     ModelSelectorPill(
@@ -133,6 +150,7 @@ fun ChatScreen(
                     }
                 },
                 actions = {
+                    vm.currentSession?.let { HistoryMenu(vm, it) }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Default.Settings, contentDescription = "Settings")
                     }
@@ -192,6 +210,7 @@ fun ChatScreen(
                 val message = vm.currentMessages[index]
                 MessageRow(
                     message = message,
+                    actions = { buzz(); actionIndex = index },
                     isLast = index == vm.currentMessages.size - 1,
                     showStats = index == vm.currentMessages.size - 1 && !vm.streamActive,
                     vm = vm,
@@ -218,16 +237,18 @@ fun ChatScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageRow(
     message: ChatMessage,
+    actions: () -> Unit,
     isLast: Boolean,
     showStats: Boolean,
     vm: ChatViewModel,
 ) {
     val isUser = message.role == "user"
     Box(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = {}, onLongClick = actions),
         contentAlignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart,
     ) {
         if (isUser) {
@@ -237,8 +258,8 @@ private fun MessageRow(
                     .clip(RoundedCornerShape(18.dp))
                     .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.9f))
                     .padding(horizontal = 14.dp, vertical = 10.dp),
-                color = Color.White,
-                fontSize = 15.sp,
+                color = MaterialTheme.colorScheme.onPrimary,
+                fontSize = vm.settings.font.sp,
             )
         } else {
             val split = ThinkBlocks.split(message.content)
@@ -258,7 +279,15 @@ private fun MessageRow(
                     }
                 }
                 if (showStats && isLast) {
-                    AssistantMetaRow(vm)
+                    Telemetry(vm)
+                }
+                val clipboard = LocalClipboardManager.current
+                val buzz = hapticAction()
+                Row {
+                    IconButton(onClick = { buzz(); clipboard.setText(AnnotatedString(message.content)) }) {
+                        Icon(Icons.Default.ContentCopy, "Copy reply")
+                    }
+                    TextButton(onClick = actions) { Text("Actions") }
                 }
             }
         }
@@ -288,6 +317,7 @@ private fun StreamingRow(vm: ChatViewModel) {
         } else {
             if (split.think != null) ThinkAccordion(split.think)
             MarkdownText(split.answer + " ▍")
+            Telemetry(vm)
         }
     }
 }
@@ -335,41 +365,6 @@ private fun ThinkAccordion(think: String) {
 }
 
 /** Live tokens/sec badge + copy button under a completed assistant reply. */
-@Composable
-private fun AssistantMetaRow(vm: ChatViewModel) {
-    val clipboard = LocalClipboardManager.current
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.padding(top = 8.dp),
-    ) {
-        if (vm.isLoaded) {
-            BadgeChip(
-                text = vm.activeBackendLabel,
-                color = if (vm.isUsingVulkan) MaterialTheme.colorScheme.tertiary
-                    else MaterialTheme.colorScheme.secondary,
-            )
-        }
-        BadgeChip(
-            text = "%.1f t/s · %d tokens".format(vm.lastTps, vm.lastTokens),
-            color = MaterialTheme.colorScheme.primary,
-        )
-        val last = vm.currentMessages.lastOrNull { it.role == "assistant" }
-        if (last != null) {
-            IconButton(
-                onClick = { clipboard.setText(AnnotatedString(ThinkBlocks.strip(last.content))) },
-                modifier = Modifier.size(28.dp),
-            ) {
-                Icon(
-                    Icons.Default.ContentCopy,
-                    contentDescription = "Copy reply",
-                    modifier = Modifier.size(16.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun EmptyState(
@@ -439,6 +434,10 @@ private fun EmptyState(
 @Composable
 private fun InputBar(vm: ChatViewModel) {
     var showSheet by remember { mutableStateOf(false) }
+    val buzz = hapticAction()
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) vm.attach(uri)
+    }
     val sheetState = rememberModalBottomSheetState()
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
@@ -450,6 +449,9 @@ private fun InputBar(vm: ChatViewModel) {
             .navigationBarsPadding()
             .imePadding(),
     ) {
+        vm.attachment?.let { file ->
+            TextButton(onClick = vm::clearAttachment) { Text(file.name + if (file.truncated) " · first 12 KiB   ×" else "   ×") }
+        }
         if (vm.preWarming) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -473,7 +475,7 @@ private fun InputBar(vm: ChatViewModel) {
             horizontalArrangement = Arrangement.End,
         ) {
             Surface(
-                onClick = { vm.updateFastMode(!vm.fastMode) },
+                onClick = { buzz(); vm.updateFastMode(!vm.fastMode) },
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant,
             ) {
@@ -522,9 +524,11 @@ private fun InputBar(vm: ChatViewModel) {
                 }
             }
             Spacer(Modifier.width(6.dp))
-            val canSend = vm.isLoaded && vm.input.isNotBlank() && !vm.isGenerating
+            val canSend = !vm.busy && ((vm.isLoaded && (vm.input.isNotBlank() || vm.attachment != null)) ||
+                (vm.attachment == null && vm.settings.calculator && vm.input.trimStart().startsWith("/calc ")))
             Surface(
                 onClick = {
+                    buzz()
                     keyboardController?.hide()
                     focusManager.clearFocus()
                     if (vm.isGenerating) vm.stopGeneration() else if (canSend) vm.send()
@@ -551,15 +555,15 @@ private fun InputBar(vm: ChatViewModel) {
             Column(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
                 Text("Attachments & Plugins", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(4.dp))
-                Text(
-                    "These will plug into the chat bar in a future update.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(12.dp))
-                SheetRow("Attach files", "Summarize PDFs, docs and images")
-                SheetRow("Web search", "Ground answers with live sources")
-                SheetRow("Reminders", "Create on-device reminders from chat")
+                TextButton(onClick = { showSheet = false; picker.launch(arrayOf("*/*")) }) {
+                    Text("Attach text or code file")
+                }
+                for ((label, prompt) in listOf("Summarize" to "Summarize the following:",
+                        "Explain Simply" to "Explain this in simple language:",
+                        "Debug Code" to "Find and explain the bug in this code:",
+                        "Bullet Points" to "Turn this into bullet points:")) {
+                    TextButton(onClick = { vm.onInputChange("$prompt\n" + vm.input); showSheet = false }) { Text(label) }
+                }
                 Spacer(Modifier.height(24.dp))
             }
         }
@@ -567,21 +571,17 @@ private fun InputBar(vm: ChatViewModel) {
 }
 
 @Composable
-private fun SheetRow(title: String, subtitle: String) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 8.dp),
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        BadgeChip(text = "Coming Soon", color = MaterialTheme.colorScheme.tertiary)
+private fun Telemetry(vm: ChatViewModel) {
+    if (!vm.isLoaded || vm.used == 0) return
+    val ratio = (vm.used.toFloat() / vm.capacity.coerceAtLeast(1)).coerceIn(0f, 1f)
+    Column(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+        Text("%s · %.0f ms TTFT · %.1f p/s · %.1f t/s".format(vm.activeBackendLabel, vm.ttft, vm.prefill, vm.lastTps),
+            style = MaterialTheme.typography.labelSmall)
+        androidx.compose.material3.LinearProgressIndicator(progress = { ratio }, modifier = Modifier.fillMaxWidth(),
+            color = when { ratio >= .95f -> MaterialTheme.colorScheme.error
+                ratio >= .8f -> Color(0xFFFFB844)
+                else -> MaterialTheme.colorScheme.primary })
+        Text("${vm.used} / ${vm.capacity} tokens", style = MaterialTheme.typography.labelSmall)
+        if (ratio >= .8f) TextButton(onClick = vm::newChatFromMeter) { Text("New chat") }
     }
 }

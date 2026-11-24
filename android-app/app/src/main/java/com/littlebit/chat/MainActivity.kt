@@ -93,9 +93,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         installCrashLogHandler()
         setContent {
-            LittleBitTheme {
+            val vm: ChatViewModel = viewModel()
+            LittleBitTheme(vm.settings) {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    RootScaffold()
+                    RootScaffold(vm)
                 }
             }
         }
@@ -143,7 +144,7 @@ private fun RootScaffold(vm: ChatViewModel = viewModel()) {
                         screen = AppScreen.CHAT
                         closeDrawer()
                     },
-                    onDeleteChat = vm::deleteChat,
+
                     onOpenModelHub = {
                         hideIme()
                         screen = AppScreen.MODEL_HUB
@@ -171,7 +172,7 @@ private fun RootScaffold(vm: ChatViewModel = viewModel()) {
                 onOpenSettings = { hideIme(); screen = AppScreen.SETTINGS },
             )
             AppScreen.MODEL_HUB -> ModelHubScreen(vm = vm, onBack = { hideIme(); screen = AppScreen.CHAT })
-            AppScreen.PLUGINS -> PluginsScreen(onBack = { hideIme(); screen = AppScreen.CHAT })
+            AppScreen.PLUGINS -> PluginsScreen(vm, onBack = { hideIme(); screen = AppScreen.CHAT })
             AppScreen.SETTINGS -> SettingsScreen(vm = vm, onBack = { hideIme(); screen = AppScreen.CHAT })
         }
     }
@@ -182,7 +183,7 @@ private fun DrawerContent(
     vm: ChatViewModel,
     onNewChat: () -> Unit,
     onOpenChat: (String) -> Unit,
-    onDeleteChat: (String) -> Unit,
+
     onOpenModelHub: () -> Unit,
     onOpenPlugins: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -230,16 +231,19 @@ private fun DrawerContent(
         )
         Spacer(Modifier.height(4.dp))
 
+        var query by remember { mutableStateOf("") }
+        androidx.compose.material3.OutlinedTextField(query, { query = it }, singleLine = true,
+            label = { Text("Search chats") }, modifier = Modifier.fillMaxWidth())
         LazyColumn(Modifier.weight(1f, fill = false)) {
             items(
-                items = vm.sessions,
+                items = vm.sortedSessions.filter { s -> s.title.contains(query, true) || s.messages.any { it.content.contains(query, true) } },
                 key = { it.id },
             ) { session ->
                 ChatHistoryRow(
                     session = session,
                     selected = session.id == vm.currentSession?.id,
                     onOpen = { onOpenChat(session.id) },
-                    onDelete = { onDeleteChat(session.id) },
+                    menu = { com.littlebit.chat.ui.HistoryMenu(vm, session) },
                 )
             }
         }
@@ -275,7 +279,7 @@ private fun ChatHistoryRow(
     session: ChatSession,
     selected: Boolean,
     onOpen: () -> Unit,
-    onDelete: () -> Unit,
+    menu: @Composable () -> Unit,
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -287,7 +291,7 @@ private fun ChatHistoryRow(
     ) {
         Column(Modifier.weight(1f)) {
             Text(
-                session.title,
+                (if (session.pinned) "★ " else "") + session.title,
                 style = MaterialTheme.typography.bodyMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -298,13 +302,6 @@ private fun ChatHistoryRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        IconButton(onClick = onDelete, modifier = Modifier.size(34.dp)) {
-            Icon(
-                Icons.Default.Delete,
-                contentDescription = "Delete chat",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(18.dp),
-            )
-        }
+        menu()
     }
 }

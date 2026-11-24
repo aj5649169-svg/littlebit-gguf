@@ -188,6 +188,45 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                     onChangeFinished = { settings.dryMultiplier = dry.toDouble() },
                 )
             }
+            item { Text("Appearance", style = MaterialTheme.typography.titleMedium) }
+            item { Choices("Theme", listOf("System","Dark","Light","AMOLED Pure Black"), settings.theme) { settings.theme = it } }
+            item { Choices("Accent", listOf("Emerald","Ocean Blue","Violet","Amber","Rose"), settings.accent) { settings.accent = it } }
+            item { Choices("Chat text", listOf("Compact 13sp","Normal 15sp","Large 17sp"),
+                when(settings.font) { 13 -> "Compact 13sp"; 17 -> "Large 17sp"; else -> "Normal 15sp" }) {
+                settings.font = it.substringAfter(' ').removeSuffix("sp").toInt()
+            } }
+            item { SwitchRow("Haptics", "Feedback on chat actions", settings.haptics) { settings.haptics = it } }
+            item { Choices("Prefill batch · reload model", listOf("256","512","1024"), settings.batch.toString()) { settings.batch = it.toInt() } }
+            item { SwitchRow("Flash attention", "Applies on model reload", settings.flash) { settings.flash = it } }
+            item { Choices("Top K", listOf("0","20","40","80"), settings.topK.toString()) { settings.topK = it.toInt() } }
+            item { Choices("Top P (%)", listOf("80","90","95","100"), settings.topPercent.toString()) { settings.topPercent = it.toInt() } }
+            item { Choices("Min P (%)", listOf("0","5","10"), settings.minPercent.toString()) { settings.minPercent = it.toInt() } }
+            item { Choices("Output token limit", listOf("256","512","1024","2048","8192"), settings.maxTokens.toString()) { settings.maxTokens = it.toInt() } }
+            item {
+                val presets = mapOf("Concise" to SettingsStore.DEFAULT_SYSTEM_PROMPT,
+                    "Coder" to "Write correct code. Explain choices briefly.",
+                    "Study Tutor" to "Teach step by step, with examples and checks for understanding.",
+                    "Creative" to "Tell vivid stories with original details and distinctive voices.")
+                Choices("System persona", presets.keys.toList() + "Custom", settings.persona) {
+                    settings.persona = it
+                    systemPrompt = presets[it] ?: settings.customPrompt
+                    settings.systemPrompt = systemPrompt
+                    vm.invalidateDraft()
+                }
+            }
+            if (vm.isLoaded || settings.benchmarkHistory != "[]") item {
+                Card { Column(Modifier.padding(14.dp)) {
+                    Text("Quick benchmark", style = MaterialTheme.typography.titleMedium)
+                    Text("Runs a fixed Fast prompt on the loaded backend. Reload with the other backend to compare.",
+                        style = MaterialTheme.typography.bodySmall)
+                    TextButton(enabled = vm.isLoaded && !vm.busy, onClick = vm::benchmark) {
+                        Text(if (vm.benchmarking) "Benchmark running…" else "Run Quick Benchmark")
+                    }
+                    val rows = org.json.JSONArray(settings.benchmarkHistory)
+                    for (i in 0 until rows.length()) Text(rows.getString(i), modifier = Modifier.padding(vertical = 4.dp),
+                        style = MaterialTheme.typography.bodySmall)
+                } }
+            }
             item(key = "sysprompt") {
                 Column {
                     Text("System Prompt", style = MaterialTheme.typography.titleSmall)
@@ -196,7 +235,10 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                         value = systemPrompt,
                         onValueChange = {
                             systemPrompt = it
+                            settings.persona = "Custom"
+                            settings.customPrompt = it
                             settings.systemPrompt = it
+                            vm.invalidateDraft()
                         },
                         modifier = Modifier.fillMaxWidth(),
                         minLines = 3,
@@ -331,6 +373,7 @@ private fun SwitchRow(
     enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit,
 ) {
+    val buzz = hapticAction()
     Card(shape = RoundedCornerShape(16.dp)) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -346,7 +389,22 @@ private fun SwitchRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Switch(checked = checked, enabled = enabled, onCheckedChange = onCheckedChange)
+            Switch(checked = checked, enabled = enabled, onCheckedChange = { buzz(); onCheckedChange(it) })
+        }
+    }
+}
+
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun Choices(title: String, choices: List<String>, selected: String, choose: (String) -> Unit) {
+    val buzz = hapticAction()
+    Column {
+        Text(title, style = MaterialTheme.typography.titleSmall)
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            choices.forEach { item ->
+                androidx.compose.material3.FilterChip(selected = selected == item,
+                    onClick = { buzz(); choose(item) }, label = { Text(item) })
+            }
         }
     }
 }

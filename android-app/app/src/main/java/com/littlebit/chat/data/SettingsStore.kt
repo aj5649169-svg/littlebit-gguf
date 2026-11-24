@@ -1,5 +1,8 @@
 package com.littlebit.chat.data
 
+import androidx.compose.runtime.mutableStateOf
+import kotlin.properties.ReadWriteProperty
+import kotlin.reflect.KProperty
 import android.content.Context
 import android.content.SharedPreferences
 
@@ -17,6 +20,41 @@ class SettingsStore(context: Context) {
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences("littlebit_settings", Context.MODE_PRIVATE)
+
+    // Shared observable preferences let settings changes reach the open chat immediately.
+    private fun <T> preference(key: String, default: T, read: (String, T) -> T,
+                               write: (SharedPreferences.Editor, String, T) -> Unit): ReadWriteProperty<Any?, T> {
+        val state = mutableStateOf(read(key, default))
+        return object : ReadWriteProperty<Any?, T> {
+            override fun getValue(thisRef: Any?, property: KProperty<*>) = state.value
+            override fun setValue(thisRef: Any?, property: KProperty<*>, value: T) {
+                prefs.edit().also { write(it, key, value) }.apply()
+                state.value = value
+            }
+        }
+    }
+    private fun flag(key: String, default: Boolean) =
+        preference(key, default, prefs::getBoolean) { e, k, v -> e.putBoolean(k, v) }
+    private fun number(key: String, default: Int) =
+        preference(key, default, prefs::getInt) { e, k, v -> e.putInt(k, v) }
+    private fun label(key: String, default: String) =
+        preference(key, default, { k, d -> prefs.getString(k, d) ?: d }) { e, k, v -> e.putString(k, v) }
+
+    var batch by number("prefill_batch", 512)
+    var flash by flag("flash_attention", false)
+    var topK by number("top_k", 40)
+    var topPercent by number("top_p_percent", 90)
+    var minPercent by number("min_p_percent", 5)
+    var maxTokens by number("max_tokens", 1024)
+    var theme by label("appearance_mode", "System")
+    var accent by label("appearance_accent", "Emerald")
+    var font by number("chat_font_sp", 15)
+    var haptics by flag("chat_haptics", true)
+    var calculator by flag("plugin_calc", true)
+    var clock by flag("plugin_clock", false)
+    var benchmarkHistory by label("benchmarks", "[]")
+    var customPrompt by label("custom_prompt", systemPrompt)
+    var persona by label("persona", if (systemPrompt == DEFAULT_SYSTEM_PROMPT) "Concise" else "Custom")
 
     /** CPU threads 2–8. Default 4 = optimal for Big.LITTLE performance cores. */
     var threads: Int

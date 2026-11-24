@@ -19,6 +19,7 @@ internal object LlamaJni {
         nThreads: Int,
         nBatch: Int,
         nGpuLayers: Int,
+        flash: Boolean,
         progress: LlamaEngine.ProgressCallback?,
     ): Long
 
@@ -40,6 +41,8 @@ internal object LlamaJni {
         prompt: String,
         temperature: Double,
         topK: Int,
+        topP: Double,
+        minP: Double,
         repeatPenalty: Double,
         dryMultiplier: Double,
         maxTokens: Int,
@@ -56,6 +59,8 @@ internal object LlamaJni {
         handle: Long,
         temperature: Double,
         topK: Int,
+        topP: Double,
+        minP: Double,
         repeatPenalty: Double,
         dryMultiplier: Double,
         maxTokens: Int,
@@ -63,6 +68,9 @@ internal object LlamaJni {
         callback: LlamaEngine.TokenCallback,
     ): Int
 
+    external fun nativeMetrics(handle: Long): DoubleArray
+    external fun nativeReset(handle: Long)
+    external fun nativePromptSize(handle: Long, prompt: String): Int
     external fun nativeStop(handle: Long)
     external fun nativeSetThreads(handle: Long, threads: Int)
     external fun nativeUnload(handle: Long)

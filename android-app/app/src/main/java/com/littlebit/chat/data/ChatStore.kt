@@ -1,6 +1,9 @@
 package com.littlebit.chat.data
 
 import android.util.Log
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateListOf
 import java.io.File
 import java.nio.file.Files
@@ -9,8 +12,12 @@ import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
 
-data class ChatMessage(val role: String, val content: String)
-data class ChatSession(val id: String, var title: String, var updatedAt: Long, val messages: MutableList<ChatMessage>)
+data class ChatMessage(val role: String, val content: String, val fast: Boolean = false, val cutOff: Boolean = false)
+class ChatSession(val id: String, title: String, updatedAt: Long, val messages: MutableList<ChatMessage>, pinned: Boolean = false) {
+    var title by mutableStateOf(title)
+    var updatedAt by mutableStateOf(updatedAt)
+    var pinned by mutableStateOf(pinned)
+}
 
 /** JSON chat history with guarded writes and recoverable streaming drafts. */
 class ChatStore(private val file: File) {
@@ -27,17 +34,17 @@ class ChatStore(private val file: File) {
             val arr = root.optJSONArray("chats") ?: return
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
-                val messages = mutableListOf<ChatMessage>()
+                val messages = mutableStateListOf<ChatMessage>()
                 val rows = o.optJSONArray("messages") ?: JSONArray()
                 for (j in 0 until rows.length()) {
                     val m = rows.getJSONObject(j)
-                    messages.add(ChatMessage(m.getString("role"), m.getString("content")))
+                    messages.add(ChatMessage(m.getString("role"), m.getString("content"), m.optBoolean("fast"), m.optBoolean("cutOff")))
                 }
                 sessions.add(ChatSession(
                     id = o.getString("id"),
                     title = o.optString("title", "New chat"),
                     updatedAt = o.optLong("updatedAt", 0L),
-                    messages = messages,
+                    messages = messages, pinned = o.optBoolean("pinned"),
                 ))
             }
             sessions.sortByDescending { it.updatedAt }
@@ -58,11 +65,14 @@ class ChatStore(private val file: File) {
             for (s in sessions) {
                 val o = JSONObject()
                 o.put("id", s.id)
+                o.put("pinned", s.pinned)
                 o.put("title", s.title)
                 o.put("updatedAt", s.updatedAt)
                 val messages = JSONArray()
                 for (m in s.messages) {
                     val mo = JSONObject()
+                    mo.put("fast", m.fast)
+                    mo.put("cutOff", m.cutOff)
                     mo.put("role", m.role)
                     mo.put("content", m.content)
                     messages.put(mo)
@@ -92,14 +102,14 @@ class ChatStore(private val file: File) {
     fun persistDraft(session: ChatSession, visible: List<ChatMessage>, partial: String) {
         session.messages.clear()
         session.messages.addAll(visible)
-        if (partial.isNotEmpty()) session.messages.add(ChatMessage("assistant", partial))
+        if (partial.isNotEmpty()) session.messages.add(ChatMessage("assistant", partial, cutOff = true))
         session.updatedAt = System.currentTimeMillis()
         save()
     }
 
     @Synchronized
     fun create(): ChatSession {
-        val session = ChatSession(UUID.randomUUID().toString(), "New chat", System.currentTimeMillis(), mutableListOf())
+        val session = ChatSession(UUID.randomUUID().toString(), "New chat", System.currentTimeMillis(), mutableStateListOf())
         sessions.add(0, session)
         save()
         return session
@@ -115,7 +125,7 @@ class ChatStore(private val file: File) {
     fun touch(session: ChatSession) {
         if (session.title == "New chat") {
             val first = session.messages.firstOrNull { it.role == "user" }?.content
-            if (!first.isNullOrBlank()) session.title = first.replace(Regex("\\s+"), " ").take(32).trim()
+            if (!first.isNullOrBlank()) session.title = first.trim().split(Regex("\\s+"), limit = 7).take(6).joinToString(" ").take(80)
         }
         session.updatedAt = System.currentTimeMillis()
         sessions.sortByDescending { it.updatedAt }

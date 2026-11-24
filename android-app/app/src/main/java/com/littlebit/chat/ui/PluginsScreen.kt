@@ -43,7 +43,7 @@ private fun pluginIcon(id: String): ImageVector = when (id) {
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PluginsScreen(onBack: () -> Unit) {
+fun PluginsScreen(vm: ChatViewModel, onBack: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
@@ -63,14 +63,6 @@ fun PluginsScreen(onBack: () -> Unit) {
                 .padding(horizontal = 14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            item(key = "note") {
-                Text(
-                    "Connectors are stubbed and ready to wire — each implements the AppPlugin " +
-                        "interface and will plug into the engine's tool loop.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
             for (plugin in PluginRegistry.plugins) {
                 item(key = plugin.id) {
                     Card(shape = RoundedCornerShape(16.dp)) {
@@ -97,7 +89,15 @@ fun PluginsScreen(onBack: () -> Unit) {
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
-                            BadgeChip(text = "Coming Soon", color = MaterialTheme.colorScheme.tertiary)
+                            if (plugin.isEnabled) {
+                                val calc = plugin.id == "calculator"
+                                androidx.compose.material3.Switch(
+                                    checked = if (calc) vm.settings.calculator else vm.settings.clock,
+                                    onCheckedChange = {
+                                        if (calc) vm.settings.calculator = it else vm.settings.clock = it
+                                        vm.invalidateDraft()
+                                    })
+                            } else BadgeChip(text = "Coming Soon", color = MaterialTheme.colorScheme.tertiary)
                         }
                     }
                 }
