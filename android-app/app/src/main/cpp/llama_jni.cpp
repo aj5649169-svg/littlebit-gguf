@@ -37,6 +37,7 @@ jmethodID g_progress_on_progress = nullptr;
 jclass    g_token_cb_class       = nullptr;
 jmethodID g_token_on_token       = nullptr;
 jmethodID g_token_on_complete    = nullptr;
+jmethodID g_prefill = nullptr;
 jmethodID g_token_on_error       = nullptr;
 
 struct NativeEngine {
@@ -44,6 +45,7 @@ struct NativeEngine {
     llama_context *     ctx    = nullptr;
     const llama_vocab * vocab  = nullptr;
     std::atomic<bool>   stop{false};
+    std::atomic<bool>   in_prefill{false};
     // Number of tokens currently decoded in the KV cache. Tracked across
     // nativeGenerate / nativeContinueGenerate so a speculative pre-warm can
     // be flushed and seamlessly continued without re-processing the prompt.
@@ -377,7 +379,7 @@ int runSamplingLoop(JNIEnv * env, NativeEngine * e, jobject cb,
         const int rc = llama_process(e->ctx, LLAMA_PROCESS_TYPE_DECODE, b);
         llama_batch_ext_free(b);
         if (idx < 0 || rc != 0) {
-            llama_memory_clear(llama_get_memory(e->ctx), true);
+            llama_memory_clear(llama_get_memory(e->ctx), false);
             e->cached_tokens.clear();
             e->n_past = 0;
             status = -1;
@@ -423,6 +425,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeInit(JNIEnv * env, jobject) {
             g_progress_on_progress = getMethod(env, g_progress_cb_class, "onProgress", "(F)V");
             g_token_on_token       = getMethod(env, g_token_cb_class, "onToken", "(Ljava/lang/String;)V");
             g_token_on_complete    = getMethod(env, g_token_cb_class, "onComplete", "(ID)V");
+            g_prefill = getMethod(env, g_token_cb_class, "onPrefill", "(II)V");
             g_token_on_error       = getMethod(env, g_token_cb_class, "onError", "(Ljava/lang/String;)V");
         } catch (const std::exception & e) {
             LOGE("callback init failed: %s", e.what());
@@ -464,6 +467,13 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeLoadModel(
             const int layers = attempts[attempt];
             try {
                 llama_model_params mparams = llama_model_default_params();
+                // Zero GPU layers alone still lets AUTO inspect GPU devices
+                // and disable mmap when a device lacks mmap support.
+                static ggml_backend_dev_t cpu_only[] = {nullptr};
+                if (layers == 0) {
+                    mparams.devices = cpu_only;
+                    mparams.load_mode = LLAMA_LOAD_MODE_MMAP;
+                }
                 mparams.n_gpu_layers = layers;
                 mparams.progress_callback = pst ? progressThunk : nullptr;
                 mparams.progress_callback_user_data = pst.get();
@@ -475,14 +485,31 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeLoadModel(
                 engine->vocab = llama_model_get_vocab(engine->model);
 
                 llama_context_params cparams = llama_context_default_params();
-                cparams.n_ctx           = n_ctx > 0 ? static_cast<uint32_t>(n_ctx) : 4096;
+                cparams.n_ctx           = n_ctx > 0 ? static_cast<uint32_t>(n_ctx) : 2048;
                 cparams.n_batch         = n_batch > 0 ? static_cast<uint32_t>(n_batch) : 512;
-                cparams.n_ubatch        = cparams.n_batch;
-                cparams.flash_attn_type = flash ? LLAMA_FLASH_ATTN_TYPE_ENABLED : LLAMA_FLASH_ATTN_TYPE_DISABLED;
+                cparams.n_ubatch        = std::min(cparams.n_batch, 256u);
+                cparams.op_offload = layers > 0;
+                cparams.offload_kqv = layers > 0;
+                if (layers == 0) {
+                    cparams.abort_callback = [](void * data) {
+                        auto * e = static_cast<NativeEngine *>(data);
+                        return e->in_prefill.load() && e->stop.load();
+                    };
+                    cparams.abort_callback_data = engine.get();
+                }
                 cparams.n_threads       = n_threads;
                 cparams.n_threads_batch = n_threads;
 
-                engine->ctx = llama_init_from_model(engine->model, cparams);
+                if (layers > 0 && flash) {
+                    cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO;
+                    cparams.type_k = cparams.type_v = GGML_TYPE_Q8_0;
+                    engine->ctx = llama_init_from_model(engine->model, cparams);
+                }
+                if (!engine->ctx) {
+                    cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+                    cparams.type_k = cparams.type_v = GGML_TYPE_F16;
+                    engine->ctx = llama_init_from_model(engine->model, cparams);
+                }
                 if (engine->ctx == nullptr) {
                     throw std::runtime_error("failed to create llama context");
                 }
@@ -640,7 +667,8 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
         e->pending_utf8.clear();
         const std::string prompt = toStdString(env, jprompt);
         const int n_ctx   = static_cast<int>(llama_n_ctx(e->ctx));
-        const int n_batch = static_cast<int>(llama_n_batch(e->ctx));
+        const int logical_batch = static_cast<int>(llama_n_batch(e->ctx));
+        const int n_batch = e->gpu_layers > 0 ? logical_batch : std::min(64, logical_batch);
         const int n_vocab = static_cast<int>(llama_vocab_n_tokens(e->vocab));
 
         // Tokenize the fully-templated prompt (special tokens parsed, BOS left to the template).
@@ -685,14 +713,16 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
         while (lcp < n_prompt - 1 && lcp < e->n_past &&
                e->cached_tokens[lcp] == prompt_tokens[lcp]) ++lcp;
         auto mem = llama_get_memory(e->ctx);
-        if (lcp == 0 || (lcp < e->n_past && (llama_memory_seq_pos_min(mem, 0) > 0 ||
+        if ((lcp == 0 && e->n_past > 0) || (lcp < e->n_past && (llama_memory_seq_pos_min(mem, 0) > 0 ||
                 !llama_memory_seq_rm(mem, 0, lcp, -1)))) {
-            llama_memory_clear(mem, true);
+            llama_memory_clear(mem, false);
             lcp = 0;
         }
         e->cached_tokens.resize(lcp);
         e->n_past = lcp;
         const auto prefill_start = std::chrono::steady_clock::now();
+        e->in_prefill.store(true);
+        env->CallVoidMethod(cb, g_prefill, lcp, n_prompt);
         for (int i0 = lcp; i0 < n_prompt && !e->stop.load(); i0 += n_batch) {
             const int chunk = std::min(n_batch, n_prompt - i0);
             llama_batch_ext * b = llama_batch_ext_init(e->ctx);
@@ -719,12 +749,14 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
             e->cached_tokens.insert(e->cached_tokens.end(), prompt_tokens.begin() + i0,
                                     prompt_tokens.begin() + i0 + chunk);
             e->n_past += chunk;
+            env->CallVoidMethod(cb, g_prefill, e->n_past, n_prompt);
         }
 
+        e->in_prefill.store(false);
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - prefill_start).count();
         e->prefill_rate = secs > 0 ? (e->n_past - lcp) / secs : 0;
         if (failed) {
-            llama_memory_clear(mem, true);
+            llama_memory_clear(mem, false);
             e->cached_tokens.clear();
             e->n_past = 0;
         }
@@ -736,8 +768,8 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
 
         env->DeleteGlobalRef(cb);
 
-        if (failed) return -1;
         if (e->stop.load()) return 1;
+        if (failed) return -1;
         return status;
     } catch (const std::exception & ex) {
         callOnError(env, cb, ex.what());
@@ -826,7 +858,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeUnload(JNIEnv *, jobject, jlong ha
 extern "C" JNIEXPORT void JNICALL
 Java_com_littlebit_chat_engine_LlamaJni_nativeReset(JNIEnv *, jobject, jlong handle) {
     auto * e = reinterpret_cast<NativeEngine *>(handle);
-    llama_memory_clear(llama_get_memory(e->ctx), true);
+    llama_memory_clear(llama_get_memory(e->ctx), false);
     e->cached_tokens.clear();
     e->pending_utf8.clear();
     e->n_past = 0;

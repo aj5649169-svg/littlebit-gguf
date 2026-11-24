@@ -309,7 +309,7 @@ private fun StreamingRow(vm: ChatViewModel) {
                 CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp)
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    if (vm.fastMode) "Reading prompt…" else "Thinking…",
+                    "Reading prompt… ${vm.promptProgress}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

@@ -1,7 +1,10 @@
-# ProGuard is disabled for debug builds of the engine JNI bridge.
-# Keep JNI-called classes/methods (external fun declarations are kept by R8
-# via the native signature, but be explicit for safety).
--keepclassmembers class com.littlebit.chat.engine.LlamaJni {
-    native <methods>;
-}
--keep class com.littlebit.chat.engine.LlamaEngine$* { *; }
+# JNI resolves these names/descriptors at runtime via FindClass/GetMethodID.
+-keep class com.littlebit.chat.engine.LlamaJni { *; }
+-keep interface com.littlebit.chat.engine.LlamaEngine$ProgressCallback { *; }
+-keep interface com.littlebit.chat.engine.LlamaEngine$TokenCallback { *; }
+-keepclassmembers class * implements com.littlebit.chat.engine.LlamaEngine$ProgressCallback { public *; }
+-keepclassmembers class * implements com.littlebit.chat.engine.LlamaEngine$TokenCallback { public *; }
+# History uses explicit org.json keys; its schema is independent of JVM names.
+-keepnames class com.littlebit.chat.data.ModelEntry
+-keepnames class com.littlebit.chat.data.ChatMessage
+-keepnames class com.littlebit.chat.data.ChatSession

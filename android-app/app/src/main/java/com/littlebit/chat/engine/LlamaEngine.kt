@@ -56,6 +56,7 @@ class LlamaEngine {
     }
 
     interface TokenCallback {
+        fun onPrefill(done: Int, total: Int)
         fun onToken(piece: String)
         fun onComplete(tokens: Int, tokensPerSec: Double)
         fun onError(message: String)
@@ -79,11 +80,11 @@ class LlamaEngine {
      */
     fun loadModel(
         path: String,
-        contextSize: Int = 4096,
+        contextSize: Int = 2048,
         threads: Int = 4,
-        nGpuLayers: Int = 0,
+        nGpuLayers: Int = 99,
         batch: Int = 512,
-        flash: Boolean = false,
+        flash: Boolean = true,
         onProgress: ProgressCallback? = null,
     ): ModelInfo {
         check(handle == 0L) { "A model is already loaded. Unload it first." }
@@ -131,8 +132,9 @@ class LlamaEngine {
     fun generate(
         prompt: String,
         params: SamplingParams = SamplingParams(),
+        prefill: (Int, Int) -> Unit = { _, _ -> },
         onToken: (String) -> Unit = {},
-    ): GenerateResult = runGeneration(prompt, params, onToken)
+    ): GenerateResult = runGeneration(prompt, params, onToken, prefill)
 
     /**
      * Continue generation from the current KV-cache state (no prompt feeding).
@@ -148,6 +150,7 @@ class LlamaEngine {
         prompt: String?,
         params: SamplingParams,
         onToken: (String) -> Unit,
+        prefill: (Int, Int) -> Unit = { _, _ -> },
     ): GenerateResult {
         check(handle != 0L) { "No model loaded" }
         isGenerating = true
@@ -157,6 +160,7 @@ class LlamaEngine {
             var tokens = 0
             var tps = 0.0
             val cb = object : TokenCallback {
+                override fun onPrefill(done: Int, total: Int) = prefill(done, total)
                 override fun onToken(piece: String) {
                     output.append(piece)
                     tokens++

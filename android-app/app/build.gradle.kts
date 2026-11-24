@@ -8,11 +8,29 @@ android {
     namespace = "com.littlebit.chat"
     compileSdk = 35
 
+    val releaseStore = System.getenv("ANDROID_RELEASE_STORE_FILE")
+    if (!releaseStore.isNullOrBlank()) {
+        signingConfigs.create("distribution") {
+            storeFile = file(releaseStore)
+            storePassword = System.getenv("ANDROID_RELEASE_STORE_PASSWORD")
+            keyAlias = System.getenv("ANDROID_RELEASE_KEY_ALIAS")
+            keyPassword = System.getenv("ANDROID_RELEASE_KEY_PASSWORD")
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.findByName("distribution") ?: signingConfigs.getByName("debug")
+        }
+    }
+
     defaultConfig {
         applicationId = "com.littlebit.chat"
         minSdk = 28          // matches -DANDROID_PLATFORM=android-28 in scripts/build-android.sh
         targetSdk = 35
-        versionCode = 2
+        versionCode = 3
         versionName = "1.0"
 
         ndk {

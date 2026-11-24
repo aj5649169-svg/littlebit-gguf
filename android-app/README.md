@@ -1,54 +1,43 @@
-# LittleBit Chat — Android ARM64 AI Chat App
+# LittleBit Chat 1.0 for Android ARM64
 
-Native on-device LLM chat for Android (arm64-v8a, minSdk 28 / Android 9+),
-powered by this repository's patched [llama.cpp](../third_party/llama.cpp)
-with LittleBit `Q1_0` sub-1-bit support and Arm KleidiAI kernels.
+Run GGUF chat models on Android 9 or later. Inference and chat storage stay on your device. The Model Hub opens external downloads in your browser. Choose a downloaded GGUF using the system file picker or reload it from My Local Models.
 
-The model runs in-process through a JNI bridge (`libllama_jni.so`) — no
-shell execution, same speed as the Termux builds from
-[scripts/build-android.sh](../scripts/build-android.sh).
+## Install
 
-## Layout
+1. Download **LittleBit-Chat-arm64.apk** from [v1.0.0](https://github.com/aj5649169-svg/littlebit-gguf/releases/tag/v1.0.0).
+2. Open the APK in Files or Chrome. If prompted, allow that app to install unknown apps, install LittleBit Chat, then turn that permission off.
+3. Load a GGUF. Start with a 4B Q4 model when memory is tight. An 8B Q4 model needs room for weights, working buffers, KV cache and Android itself.
+4. For an update, Android requires the same signing certificate. If signatures differ, export important chats before uninstalling. Uninstalling removes app-private chats and imported model copies.
 
-```
-app/
-  build.gradle.kts            # AGP 8.7 / Kotlin 2.0 / Compose, arm64-v8a only
-  src/main/cpp/
-    CMakeLists.txt            # builds llama.cpp (static) + libllama_jni.so
-    llama_jni.cpp             # JNI bridge: load / template / stream / stop
-  src/main/java/com/littlebit/chat/
-    engine/LlamaEngine.kt     # Kotlin wrapper around the native engine
-    MainActivity.kt           # minimal engine test screen (full UI lands in Step 2)
-  src/main/assets/models.json # editable model catalog (used by Step 2's Model Hub)
-```
+## Inference
 
-## First-time build
+Vulkan defaults to 99 requested GPU layers. A failed Vulkan load retries on CPU. The backend badge shows which path loaded. New installations use a 2,048-token context, a 512-token logical batch and at most 256 tokens per physical batch. Existing explicit preferences are preserved.
 
-The Gradle wrapper JAR is intentionally not committed (binary blob). Generate
-it once with any Gradle 8.10+ install, or let the GitHub Actions workflow do it:
+Vulkan Flash Attention requests Q8_0 keys and values where context initialization accepts them. If initialization fails, the app retries F16 on the same loaded model before attempting CPU. CPU uses memory-mapped weights, F16 KV, smaller prompt chunks and Arm KleidiAI. Reload after changing the backend, flash setting, batch or context size. A reload rebuilds the existing conversation on its first send. Later turns reuse matching tokens. Prompt progress includes the history being processed.
 
-```bash
-gradle -p android-app wrapper --gradle-version 8.10
-```
+## Realme P3 Ultra measurements
 
-Then (with `ANDROID_NDK_HOME` pointing at an NDK, e.g. 26.1.10909125):
+User-reported results on a 12 GB Realme P3 Ultra with Qwen3-8B-Q4_K_M, recorded before this release polish.
 
-```bash
-cd android-app
-./gradlew :app:assembleDebug
-```
+| Run | Prefill | Decode |
+| --- | ---: | ---: |
+| Vulkan chat | 35.0 tokens/s | up to 5.1 tokens/s |
+| Vulkan Quick Benchmark | unreported | 4.6 tokens/s |
+| Earlier CPU build | unreported | 2.7 tokens/s |
+| CPU after model reload, about 1.3 GB free | no completed measurement | no token observed within 30 seconds |
 
-`CMakeLists.txt` applies `patches/*.diff` to the `third_party/llama.cpp`
-submodule automatically (idempotently) at configure time, so a plain Gradle
-build works on a fresh checkout. You can also apply them explicitly with
-`bash scripts/apply-patches.sh`.
+These runs used different conditions. To compare this release, reload the same model on each backend with the same context and thread count, then use **Settings → Run Quick Benchmark**. The last five runs are saved.
 
-## Cloud build
+## Chat features
 
-GitHub Actions (`.github/workflows/build-android-apk.yml`) builds
-`app-debug.apk` on `ubuntu-latest` and uploads it as an artifact.
+- Fast/Think modes, collapsible reasoning, optional background pre-warm, UTF-8 streaming, manual scrolling and jump to bottom.
+- TTFT, prefill and decode rates, context meter, sampling controls and system personas.
+- Local text/code attachments, prompt templates, calculator and optional local clock context.
+- Search, pin, rename, export Markdown, edit and resend, regenerate and continue interrupted replies.
+- Markdown tables, code copy, links, math formatting, AMOLED mode, accent colors, font sizes and haptics.
 
-## Engine defaults
+## Building and signing
 
-- 4 CPU threads, 4096 context (Big.LITTLE-safe, OOM-safe on 6 GB phones)
-- All standard GGUF quants (Q4_K_M, IQ2_XS, Q2_K, ...) plus patched LittleBit Q1_0
+The [APK workflow](../.github/workflows/build-android-apk.yml) installs the pinned NDK, CMake and host Vulkan SDK, applies the llama.cpp patches, runs Gradle 8.10 with JDK 17, builds the R8-optimized release variant and verifies its APK signature. Tagging the release commit as v1.0.0 attaches the APK to GitHub Releases.
+
+For stable update signing, configure GitHub secrets ANDROID_RELEASE_KEYSTORE_BASE64, ANDROID_RELEASE_STORE_PASSWORD, ANDROID_RELEASE_KEY_ALIAS and ANDROID_RELEASE_KEY_PASSWORD. Local builds take ANDROID_RELEASE_STORE_FILE and the same three password/alias environment variables. Without a configured key the release uses the debug signing configuration. Fresh CI runners can generate different certificates.

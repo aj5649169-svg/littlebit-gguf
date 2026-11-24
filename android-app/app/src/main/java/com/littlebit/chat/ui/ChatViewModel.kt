@@ -93,6 +93,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private var activeModelPath: String? = null
     var chatError by mutableStateOf<String?>(null)
         private set
+    var promptProgress by mutableStateOf("")
+        private set
     var isPrefilling by mutableStateOf(false)
         private set
     val lastModelName: String?
@@ -354,6 +356,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
             cacheSession = null
             used = 0
+            if (settings.vulkanOffload && settings.vulkanGpuLayers > 0 && info.gpuLayers == 0) {
+                chatError = "Vulkan unavailable for this load. Using CPU · KleidiAI."
+            }
             modelInfo = info
             modelName = file.name
             activeModelPath = file.absolutePath
@@ -551,30 +556,46 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         lastTokens = draft?.tokens ?: 0
         lastTps = 0.0
         engine.setThreads(settings.threads)
+        promptProgress = ""
+        val progress: (Int, Int) -> Unit = { done, total -> promptProgress = "$done / $total tokens" }
+        val output = StringBuilder(rawStream)
+        var nextUpdate = 0L
+        var nextSave = android.os.SystemClock.elapsedRealtime() + 2000L
         var pieces = 0
         val accept: (String) -> Unit = { piece ->
-            rawStream += piece
-            isPrefilling = false
+            output.append(piece)
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now >= nextUpdate) {
+                rawStream = output.toString()
+                isPrefilling = false
+                nextUpdate = now + 40L
+            }
             pieces++
             if (pieces == 1 || pieces % 8 == 0) {
                 updateMetrics()
             }
-            if (pieces % 16 == 0 && replaceIndex == null) persistStreamingDraft()
+            if (now >= nextSave && replaceIndex == null) {
+                persistStreamingDraft()
+                nextSave = now + 2000L
+            }
         }
         val result = when {
-            draft == null -> engine.generate(prompt, samplingParams(), accept)
+            draft == null -> engine.generate(prompt, samplingParams(), progress, accept)
             draft.isComplete -> requireNotNull(draft.result)
             else -> {
                 val remaining = (settings.maxTokens - draft.tokens).coerceAtLeast(1)
                 val continued = engine.continueGenerate(samplingParams(remaining), accept)
                 if (continued.status < 0) {
+                    output.setLength(0)
+                    output.append(seed)
                     rawStream = seed
                     engine.reset()
-                    engine.generate(prompt, samplingParams(), accept)
+                    engine.generate(prompt, samplingParams(), progress, accept)
                 } else continued.copy(tokens = continued.tokens + draft.tokens)
             }
         }
         updateMetrics()
+        rawStream = output.toString()
         lastTokens = result.tokens
         lastTps = result.tokensPerSec
         if (result.status < 0) chatError = result.error ?: "Generation failed"

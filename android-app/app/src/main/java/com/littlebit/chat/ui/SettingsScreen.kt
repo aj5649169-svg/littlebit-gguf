@@ -197,7 +197,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
             } }
             item { SwitchRow("Haptics", "Feedback on chat actions", settings.haptics) { settings.haptics = it } }
             item { Choices("Prefill batch · reload model", listOf("256","512","1024"), settings.batch.toString()) { settings.batch = it.toInt() } }
-            item { SwitchRow("Flash attention", "Applies on model reload", settings.flash) { settings.flash = it } }
+            item { SwitchRow("Vulkan Flash Attention", "Try Q8 KV cache on reload. CPU uses F16.", settings.flash) { settings.flash = it } }
             item { Choices("Top K", listOf("0","20","40","80"), settings.topK.toString()) { settings.topK = it.toInt() } }
             item { Choices("Top P (%)", listOf("80","90","95","100"), settings.topPercent.toString()) { settings.topPercent = it.toInt() } }
             item { Choices("Min P (%)", listOf("0","5","10"), settings.minPercent.toString()) { settings.minPercent = it.toInt() } }
@@ -267,7 +267,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
             item(key = "vulkan") {
                 SwitchRow(
                     title = "Vulkan GPU Offload",
-                    subtitle = "Experimental GPU inference. Off by default; CPU uses KleidiAI.",
+                    subtitle = "Enabled by default. Reload after changing backend.",
                     checked = vulkanEnabled,
                     onCheckedChange = {
                         vulkanEnabled = it

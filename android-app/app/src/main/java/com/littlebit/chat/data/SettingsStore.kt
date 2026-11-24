@@ -8,7 +8,7 @@ import android.content.SharedPreferences
 
 /**
  * App settings backed by SharedPreferences. Inference defaults follow the
- * Realme P3 Ultra tuning: 4 threads (Big.LITTLE performance cores), 4096 ctx,
+ * Realme P3 Ultra tuning: 4 threads (Big.LITTLE performance cores), 2048 ctx,
  * repeat penalty 1.18, DRY 0.8.
  */
 class SettingsStore(context: Context) {
@@ -41,7 +41,7 @@ class SettingsStore(context: Context) {
         preference(key, default, { k, d -> prefs.getString(k, d) ?: d }) { e, k, v -> e.putString(k, v) }
 
     var batch by number("prefill_batch", 512)
-    var flash by flag("flash_attention", false)
+    var flash by flag("flash_attention", true)
     var topK by number("top_k", 40)
     var topPercent by number("top_p_percent", 90)
     var minPercent by number("min_p_percent", 5)
@@ -63,7 +63,7 @@ class SettingsStore(context: Context) {
 
     /** Context size 1024–8192. Applies on next model load. */
     var contextSize: Int
-        get() = prefs.getInt("context_size", 4096)
+        get() = prefs.getInt("context_size", 2048)
         set(v) { prefs.edit().putInt("context_size", v.coerceIn(1024, 8192)).apply() }
 
     var temperature: Double
@@ -98,9 +98,9 @@ class SettingsStore(context: Context) {
         get() = prefs.getString("last_model_path", null)
         set(v) { prefs.edit().putString("last_model_path", v).apply() }
 
-    /** Vulkan is opt-in; KleidiAI remains the default backend. */
+    /** Vulkan is enabled by default; persist explicit CPU selections. */
     var vulkanOffload: Boolean
-        get() = prefs.getBoolean("vulkan_offload", false)
+        get() = prefs.getBoolean("vulkan_offload", true)
         set(v) { prefs.edit().putBoolean("vulkan_offload", v).apply() }
 
     /** Requested GPU layers. 99 asks llama.cpp to offload all eligible layers. */
