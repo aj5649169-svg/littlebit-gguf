@@ -411,7 +411,9 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
         // the full templated prompt from position 0. This makes repeat calls
         // (retries, pre-warm flushes that fell back) deterministic and keeps
         // llama.cpp happy even after a speculative pre-warm warmed the cache.
-        llama_kv_cache_clear(e->ctx);
+        // NOTE: llama_kv_cache_clear() was removed upstream in favour of the
+        // llama_memory_* API (llama.h "Memory" section at this pinned commit).
+        llama_memory_clear(llama_get_memory(e->ctx), true);
         e->n_past = 0;
 
         // Tokenize the fully-templated prompt (special tokens parsed, BOS left to the template).
