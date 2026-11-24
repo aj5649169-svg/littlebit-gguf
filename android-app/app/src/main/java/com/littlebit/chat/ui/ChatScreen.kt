@@ -57,6 +57,10 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.TextButton
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -127,6 +131,25 @@ fun ChatScreen(
                 .padding(horizontal = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            if (vm.chatError != null) {
+                item(key = "chat-error") {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                vm.chatError.orEmpty(),
+                                modifier = Modifier.weight(1f),
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            TextButton(onClick = vm::dismissChatError) { Text("Dismiss") }
+                        }
+                    }
+                }
+            }
             items(
                 count = vm.currentMessages.size,
                 key = { index -> index },
@@ -149,6 +172,8 @@ fun ChatScreen(
                             modelLoaded = vm.isLoaded,
                             onOpenModelHub = onOpenModelHub,
                             onSuggestion = vm::sendText,
+                            lastModelName = vm.lastModelName,
+                            onReloadLastModel = vm::reloadLastModel,
                         )
                     }
                 }
@@ -214,10 +239,20 @@ private fun StreamingRow(vm: ChatViewModel) {
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
             .padding(horizontal = 14.dp, vertical = 10.dp),
     ) {
-        if (split.think != null) {
-            ThinkAccordion(split.think)
+        if (vm.isPrefilling && vm.rawStream.isEmpty()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (vm.fastMode) "Reading prompt…" else "Thinking…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        } else {
+            if (split.think != null) ThinkAccordion(split.think)
+            MarkdownText(split.answer + " ▍")
         }
-        MarkdownText(split.answer + " ▍")
     }
 }
 
@@ -298,6 +333,8 @@ private fun EmptyState(
     modelLoaded: Boolean,
     onOpenModelHub: () -> Unit,
     onSuggestion: (String) -> Unit,
+    lastModelName: String?,
+    onReloadLastModel: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -319,8 +356,12 @@ private fun EmptyState(
         )
         Spacer(Modifier.height(20.dp))
         if (!modelLoaded) {
-            Button(onClick = onOpenModelHub) {
-                Text("Open Model Hub")
+            Button(onClick = onOpenModelHub) { Text("Open Model Hub") }
+            if (lastModelName != null) {
+                Spacer(Modifier.height(8.dp))
+                Button(onClick = onReloadLastModel) {
+                    Text("↻ Reload $lastModelName", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
             Spacer(Modifier.height(20.dp))
         }
@@ -356,6 +397,8 @@ private fun EmptyState(
 private fun InputBar(vm: ChatViewModel) {
     var showSheet by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState()
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
 
     Column(
         modifier = Modifier
@@ -383,6 +426,23 @@ private fun InputBar(vm: ChatViewModel) {
             }
         }
         Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            Surface(
+                onClick = { vm.updateFastMode(!vm.fastMode) },
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+            ) {
+                Text(
+                    if (vm.fastMode) "⚡ Fast" else "🧠 Think",
+                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 10.dp, vertical = 6.dp),
@@ -397,11 +457,6 @@ private fun InputBar(vm: ChatViewModel) {
                 modifier = Modifier.weight(1f),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    FastThinkPill(
-                        fastMode = vm.fastMode,
-                        onFast = { vm.updateFastMode(true) },
-                        onThink = { vm.updateFastMode(false) },
-                    )
                     TextField(
                         value = vm.input,
                         onValueChange = vm::onInputChange,
@@ -427,6 +482,8 @@ private fun InputBar(vm: ChatViewModel) {
             val canSend = vm.isLoaded && vm.input.isNotBlank() && !vm.isGenerating
             Surface(
                 onClick = {
+                    keyboardController?.hide()
+                    focusManager.clearFocus()
                     if (vm.isGenerating) vm.stopGeneration() else if (canSend) vm.send()
                 },
                 shape = CircleShape,

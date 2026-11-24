@@ -1,6 +1,13 @@
 package com.littlebit.chat
 
 import android.os.Bundle
+import android.os.Process
+import java.io.File
+import java.io.PrintWriter
+import java.io.StringWriter
+import kotlin.system.exitProcess
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -64,8 +71,27 @@ import kotlinx.coroutines.launch
  * plugins / settings screens, all sharing one [ChatViewModel].
  */
 class MainActivity : ComponentActivity() {
+    private fun installCrashLogHandler() {
+        val appContext = applicationContext
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            runCatching {
+                val trace = StringWriter().also { throwable.printStackTrace(PrintWriter(it)) }.toString()
+                File(appContext.filesDir, "last_crash.txt").writeText(
+                    "Thread: ${thread.name}\\nTime: ${System.currentTimeMillis()}\\n\\n$trace"
+                )
+            }
+            if (previous != null) previous.uncaughtException(thread, throwable)
+            else {
+                Process.killProcess(Process.myPid())
+                exitProcess(10)
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        installCrashLogHandler()
         setContent {
             LittleBitTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -82,6 +108,12 @@ private enum class AppScreen { CHAT, MODEL_HUB, PLUGINS, SETTINGS }
 private fun RootScaffold(vm: ChatViewModel = viewModel()) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    val hideIme: () -> Unit = {
+        keyboardController?.hide()
+        focusManager.clearFocus()
+    }
     var screen by remember { mutableStateOf(AppScreen.CHAT) }
 
     // A successful native model load always returns the user to the shared Chat screen.
@@ -113,14 +145,17 @@ private fun RootScaffold(vm: ChatViewModel = viewModel()) {
                     },
                     onDeleteChat = vm::deleteChat,
                     onOpenModelHub = {
+                        hideIme()
                         screen = AppScreen.MODEL_HUB
                         closeDrawer()
                     },
                     onOpenPlugins = {
+                        hideIme()
                         screen = AppScreen.PLUGINS
                         closeDrawer()
                     },
                     onOpenSettings = {
+                        hideIme()
                         screen = AppScreen.SETTINGS
                         closeDrawer()
                     },
@@ -131,13 +166,13 @@ private fun RootScaffold(vm: ChatViewModel = viewModel()) {
         when (screen) {
             AppScreen.CHAT -> ChatScreen(
                 vm = vm,
-                onMenu = { scope.launch { drawerState.open() } },
-                onOpenModelHub = { screen = AppScreen.MODEL_HUB },
-                onOpenSettings = { screen = AppScreen.SETTINGS },
+                onMenu = { hideIme(); scope.launch { drawerState.open() } },
+                onOpenModelHub = { hideIme(); screen = AppScreen.MODEL_HUB },
+                onOpenSettings = { hideIme(); screen = AppScreen.SETTINGS },
             )
-            AppScreen.MODEL_HUB -> ModelHubScreen(vm = vm, onBack = { screen = AppScreen.CHAT })
-            AppScreen.PLUGINS -> PluginsScreen(onBack = { screen = AppScreen.CHAT })
-            AppScreen.SETTINGS -> SettingsScreen(vm = vm, onBack = { screen = AppScreen.CHAT })
+            AppScreen.MODEL_HUB -> ModelHubScreen(vm = vm, onBack = { hideIme(); screen = AppScreen.CHAT })
+            AppScreen.PLUGINS -> PluginsScreen(onBack = { hideIme(); screen = AppScreen.CHAT })
+            AppScreen.SETTINGS -> SettingsScreen(vm = vm, onBack = { hideIme(); screen = AppScreen.CHAT })
         }
     }
 }

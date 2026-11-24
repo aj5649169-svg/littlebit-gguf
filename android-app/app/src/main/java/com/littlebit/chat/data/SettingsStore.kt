@@ -55,6 +55,11 @@ class SettingsStore(context: Context) {
         get() = prefs.getBoolean("fast_mode", true)
         set(v) { prefs.edit().putBoolean("fast_mode", v).apply() }
 
+    /** Last successfully loaded local GGUF for one-tap reload. */
+    var lastModelPath: String?
+        get() = prefs.getString("last_model_path", null)
+        set(v) { prefs.edit().putString("last_model_path", v).apply() }
+
     /** Vulkan GPU offload — effective in v0.2 once -DGGML_VULKAN=ON ships.
      *  Plumbed end-to-end now (nGpuLayers), CPU-only until then. */
     var vulkanOffload: Boolean

@@ -60,6 +60,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var modelLoadSuccessVersion by mutableIntStateOf(0)
         private set
     private var activeModelPath: String? = null
+    var chatError by mutableStateOf<String?>(null)
+        private set
+    var isPrefilling by mutableStateOf(false)
+        private set
+    val lastModelName: String?
+        get() = settings.lastModelPath?.let { File(it).takeIf(File::exists)?.name }
+
+    fun reloadLastModel() {
+        val path = settings.lastModelPath ?: return
+        val file = File(path)
+        if (file.isFile) loadLocalModel(file) else chatError = "Previously loaded model is missing: $path"
+    }
+
+    fun dismissChatError() { chatError = null }
 
     val isLoaded: Boolean get() = engine.isLoaded
 
@@ -156,9 +170,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Copy the observable message list back into the persistent session. */
     private fun syncActiveToStore() {
         val s = currentSession ?: return
-        s.messages.clear()
-        s.messages.addAll(currentMessages)
-        store.touch(s)
+        try {
+            s.messages.clear()
+            s.messages.addAll(currentMessages)
+            store.touch(s)
+            store.lastError?.let { chatError = it }
+        } catch (t: Throwable) {
+            chatError = "Chat history save failed: ${t.message ?: t.javaClass.simpleName}"
+        }
+    }
+
+    private fun persistStreamingDraft() {
+        val s = currentSession ?: return
+        try {
+            store.persistDraft(s, currentMessages.toList(), rawStream)
+            store.lastError?.let { chatError = it }
+        } catch (t: Throwable) {
+            chatError = "Chat draft save failed: ${t.message ?: t.javaClass.simpleName}"
+        }
     }
 
     // ------------------------------------------------------------ model flows
@@ -281,6 +310,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             loadProgress = 1f
             loadStatus = null
             loadError = null
+            settings.lastModelPath = file.absolutePath
             modelLoadSuccessVersion += 1
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
@@ -381,6 +411,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun runTurn(prompt: String, seedTokens: Int, seedText: String) {
         isGenerating = true
         streamActive = true
+        isPrefilling = seedText.isEmpty()
         rawStream = seedText
         lastTps = 0.0
         lastTokens = seedTokens
@@ -390,7 +421,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 engine.setThreads(settings.threads)
                 engine.generate(prompt, samplingParams()) { piece ->
                     rawStream += piece
+                    isPrefilling = false
                     lastTokens++
+                    if (lastTokens % 16 == 0) persistStreamingDraft()
                 }
             }
             if (result.status == LlamaEngine.GenerateResult.STATUS_ERROR && seedTokens > 0) {
@@ -400,7 +433,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 val retry = engineMutex.withLock {
                     engine.generate(prompt, samplingParams()) { piece ->
                         rawStream += piece
+                        isPrefilling = false
                         lastTokens++
+                        if (lastTokens % 16 == 0) persistStreamingDraft()
                     }
                 }
                 finalizeTurn(retry.tokens, t0)
@@ -417,6 +452,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun flushAndContinue(draft: SpeculativeDraft, prompt: String) {
         isGenerating = true
         streamActive = true
+        isPrefilling = false
         rawStream = draft.buffer.toString()
         lastTokens = draft.tokens
         lastTps = 0.0
@@ -457,18 +493,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun finalizeTurn(tokens: Int, t0: Long, tpsOverride: Double? = null) {
-        if (tpsOverride != null) {
-            lastTps = tpsOverride
-        } else {
-            val secs = (System.nanoTime() - t0) / 1_000_000_000.0
-            lastTps = if (secs > 0.0) tokens / secs else 0.0
+        try {
+            lastTps = tpsOverride ?: run {
+                val secs = (System.nanoTime() - t0) / 1_000_000_000.0
+                if (secs > 0.0) tokens / secs else 0.0
+            }
+            lastTokens = tokens
+            currentMessages.add(ChatMessage("assistant", rawStream))
+            syncActiveToStore()
+        } catch (t: Throwable) {
+            chatError = "Could not finalize assistant reply: ${t.message ?: t.javaClass.simpleName}"
+        } finally {
+            rawStream = ""
+            isPrefilling = false
+            streamActive = false
+            isGenerating = false
         }
-        lastTokens = tokens
-        currentMessages.add(ChatMessage("assistant", rawStream))
-        rawStream = ""
-        streamActive = false
-        isGenerating = false
-        syncActiveToStore()
     }
 
     // --------------------------------------------------------- pre-warm logic

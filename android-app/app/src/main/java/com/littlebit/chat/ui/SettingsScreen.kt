@@ -25,6 +25,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.text.style.TextOverflow
+import java.io.File
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -55,6 +58,11 @@ private fun queryRam(context: Context): RamInfo {
 fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val settings = vm.settings
+    val crashFile = remember { File(context.filesDir, "last_crash.txt") }
+    var crashLog by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        crashLog = runCatching { crashFile.takeIf { it.isFile }?.readText() }.getOrNull()
+    }
 
     var totalRam by remember { mutableLongStateOf(0L) }
     var availRam by remember { mutableLongStateOf(0L) }
@@ -93,8 +101,29 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 .padding(horizontal = 14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            item(key = "ram") {
-                RamBanner(totalRam, availRam)
+            item(key = "ram") { RamBanner(totalRam, availRam) }
+            if (crashLog != null) {
+                item(key = "last-crash-log") {
+                    Card(
+                        shape = RoundedCornerShape(16.dp),
+                        colors = androidx.compose.material3.CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                        ),
+                    ) {
+                        Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                            Text("Last crash log", style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onErrorContainer)
+                            Text(crashLog.orEmpty(), modifier = Modifier.padding(top = 8.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                maxLines = 14, overflow = TextOverflow.Ellipsis)
+                            TextButton(
+                                onClick = { crashFile.delete(); crashLog = null },
+                                modifier = Modifier.align(Alignment.End),
+                            ) { Text("Dismiss and delete") }
+                        }
+                    }
+                }
             }
             item(key = "inference-header") {
                 Text("Inference", style = MaterialTheme.typography.titleMedium)

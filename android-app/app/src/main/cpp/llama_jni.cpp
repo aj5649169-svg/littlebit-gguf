@@ -87,7 +87,7 @@ bool progressThunk(float progress, void * user_data) {
     auto * st = static_cast<ProgressState *>(user_data);
     if (st != nullptr && st->cb != nullptr && g_progress_on_progress != nullptr) {
         st->env->CallVoidMethod(st->cb, g_progress_on_progress, progress);
-        if (st->env->ExceptionCheck()) return false;
+        if (st->env->ExceptionCheck()) { st->env->ExceptionClear(); return false; }
     }
     return true;
 }
@@ -102,10 +102,53 @@ std::string tokenToPiece(const llama_vocab * vocab, llama_token token) {
     return std::string();
 }
 
+
+/** Decode ordinary UTF-8 token bytes to UTF-16; replace malformed sequences. */
+jstring utf8ToJString(JNIEnv * env, const std::string & input) {
+    std::vector<jchar> out;
+    out.reserve(input.size());
+    size_t i = 0;
+    while (i < input.size()) {
+        const auto a = static_cast<unsigned char>(input[i]);
+        uint32_t cp = 0xFFFD;
+        size_t n = 1;
+        if (a <= 0x7F) cp = a;
+        else if (a >= 0xC2 && a <= 0xDF && i + 1 < input.size()) {
+            const auto b = static_cast<unsigned char>(input[i + 1]);
+            if ((b & 0xC0) == 0x80) { cp = ((a & 0x1F) << 6) | (b & 0x3F); n = 2; }
+        } else if (a >= 0xE0 && a <= 0xEF && i + 2 < input.size()) {
+            const auto b = static_cast<unsigned char>(input[i + 1]);
+            const auto c = static_cast<unsigned char>(input[i + 2]);
+            if ((b & 0xC0) == 0x80 && (c & 0xC0) == 0x80
+                && !(a == 0xE0 && b < 0xA0) && !(a == 0xED && b >= 0xA0)) {
+                cp = ((a & 0x0F) << 12) | ((b & 0x3F) << 6) | (c & 0x3F); n = 3;
+            }
+        } else if (a >= 0xF0 && a <= 0xF4 && i + 3 < input.size()) {
+            const auto b = static_cast<unsigned char>(input[i + 1]);
+            const auto c = static_cast<unsigned char>(input[i + 2]);
+            const auto d = static_cast<unsigned char>(input[i + 3]);
+            if ((b & 0xC0) == 0x80 && (c & 0xC0) == 0x80 && (d & 0xC0) == 0x80
+                && !(a == 0xF0 && b < 0x90) && !(a == 0xF4 && b > 0x8F)) {
+                cp = ((a & 0x07) << 18) | ((b & 0x3F) << 12) | ((c & 0x3F) << 6) | (d & 0x3F); n = 4;
+            }
+        }
+        i += n;
+        if (cp <= 0xFFFF) out.push_back(static_cast<jchar>(cp));
+        else {
+            cp -= 0x10000;
+            out.push_back(static_cast<jchar>(0xD800 + (cp >> 10)));
+            out.push_back(static_cast<jchar>(0xDC00 + (cp & 0x3FF)));
+        }
+    }
+    return env->NewString(out.data(), static_cast<jsize>(out.size()));
+}
+
 void callOnError(JNIEnv * env, jobject cb, const char * msg) {
     if (g_token_on_error == nullptr) return;
-    jstring jmsg = env->NewStringUTF(msg);
+    jstring jmsg = utf8ToJString(env, std::string(msg));
+    if (jmsg == nullptr) { if (env->ExceptionCheck()) env->ExceptionClear(); return; }
     env->CallVoidMethod(cb, g_token_on_error, jmsg);
+    if (env->ExceptionCheck()) env->ExceptionClear();
     env->DeleteLocalRef(jmsg);
 }
 
@@ -182,13 +225,22 @@ int runSamplingLoop(JNIEnv * env, NativeEngine * e, jobject cb,
 
         const std::string piece = tokenToPiece(e->vocab, tok);
         if (!piece.empty()) {
-            jstring jpiece = env->NewStringUTF(piece.c_str());
+            jstring jpiece = utf8ToJString(env, piece);
+            if (jpiece == nullptr) {
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                status = -1;
+                break;
+            }
             env->CallVoidMethod(cb, g_token_on_token, jpiece);
+            const bool callbackFailed = env->ExceptionCheck();
+            if (callbackFailed) env->ExceptionClear();
             env->DeleteLocalRef(jpiece);
+            if (callbackFailed) { status = -1; break; }
         }
         n_gen++;
 
         llama_batch_ext * b = llama_batch_ext_init(e->ctx);
+        if (b == nullptr) { status = -1; callOnError(env, cb, "could not allocate decode batch"); break; }
         const llama_pos pos = e->n_past;
         const int idx = llama_batch_ext_add_token(b, 0, tok);
         if (idx >= 0) {
@@ -207,6 +259,7 @@ int runSamplingLoop(JNIEnv * env, NativeEngine * e, jobject cb,
     const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     const double tps = elapsed > 0.0 ? static_cast<double>(n_gen) / elapsed : 0.0;
     env->CallVoidMethod(cb, g_token_on_complete, n_gen, tps);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return -1; }
     return status;
 }
 
@@ -399,6 +452,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
         return -1;
     }
     jobject cb = env->NewGlobalRef(jcallback);
+    if (cb == nullptr) { if (env->ExceptionCheck()) env->ExceptionClear(); throwIllegalState(env, "could not retain generation callback"); return -1; }
 
     try {
         e->stop.store(false);
@@ -446,6 +500,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
         opts.dry_multiplier = dry_multiplier;
         opts.seed           = static_cast<long>(seed);
         llama_sampler * chain = buildSampler(e->vocab, n_vocab, opts);
+        if (chain == nullptr) { env->DeleteGlobalRef(cb); throwIllegalState(env, "could not create sampler"); return -1; }
 
         bool failed = false;
 
@@ -453,6 +508,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
         for (int i0 = 0; i0 < n_prompt && !e->stop.load(); i0 += n_batch) {
             const int chunk = std::min(n_batch, n_prompt - i0);
             llama_batch_ext * b = llama_batch_ext_init(e->ctx);
+            if (b == nullptr) { callOnError(env, cb, "could not allocate prompt batch"); failed = true; break; }
             for (int i = 0; i < chunk; i++) {
                 const llama_pos pos = e->n_past + i;
                 const int idx = llama_batch_ext_add_token(b, 0, prompt_tokens[static_cast<size_t>(i0 + i)]);
@@ -479,7 +535,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
         if (!failed && !e->stop.load()) {
             status = runSamplingLoop(env, e, cb, chain, max_tokens);
         }
-        llama_sampler_free(chain);
+        if (chain != nullptr) { llama_sampler_free(chain); chain = nullptr; }
 
         env->DeleteGlobalRef(cb);
 
@@ -522,9 +578,10 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeContinueGenerate(
         opts.dry_multiplier = dry_multiplier;
         opts.seed           = static_cast<long>(seed);
         llama_sampler * chain = buildSampler(e->vocab, n_vocab, opts);
+        if (chain == nullptr) { env->DeleteGlobalRef(cb); throwIllegalState(env, "could not create sampler"); return -1; }
 
         const int status = runSamplingLoop(env, e, cb, chain, max_tokens);
-        llama_sampler_free(chain);
+        if (chain != nullptr) { llama_sampler_free(chain); chain = nullptr; }
         env->DeleteGlobalRef(cb);
 
         if (e->stop.load()) return 1;
