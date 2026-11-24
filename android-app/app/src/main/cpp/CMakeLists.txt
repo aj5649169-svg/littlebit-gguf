@@ -87,6 +87,7 @@ target_include_directories(llama_jni PRIVATE
 
 target_link_libraries(llama_jni PRIVATE
     llama)
+    log)
 
 target_compile_options(llama_jni PRIVATE -O3)
 
