@@ -85,9 +85,14 @@ add_library(llama_jni SHARED llama_jni.cpp)
 target_include_directories(llama_jni PRIVATE
     ${LLAMA_CPP_DIR}/include)
 
+# `log` resolves the Run #2 linker error (__android_log_print from
+# logToAndroid); `android` is linked for future native glue. The previous
+# mobile edit left a stray `log)` line outside the call, which made CMake
+# configure fail with a parse error (Runs #3-#6).
 target_link_libraries(llama_jni PRIVATE
-    llama)
-    log)
+    llama
+    log
+    android)
 
 target_compile_options(llama_jni PRIVATE -O3)
 
