@@ -320,7 +320,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             // Draft finished while the user was reaching for Send — done.
             val warmSecs = (System.nanoTime() - draft.startedAt) / 1_000_000_000.0
             val warmTps = if (warmSecs > 0.0) draft.tokens / warmSecs else 0.0
-            finalizeTurn(draft.tokens, warmTps)
+            finalizeTurn(draft.tokens, draft.startedAt, tpsOverride = warmTps)
             return
         }
         val t0 = System.nanoTime()
