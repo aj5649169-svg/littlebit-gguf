@@ -7,7 +7,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -79,4 +79,17 @@ jobs:
           name: littlebit-gguf-android-arm64
           path: dist/littlebit-gguf-android-arm64.tar.gz
           if-no-files-found: error
-          
+
+      - name: Publish Android ARM64 release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/littlebit-gguf-android-arm64.tar.gz
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            Pre-built Android arm64-v8a binaries for LittleBit GGUF.
+
+            Includes llama-completion, llama-bench, required shared libraries (including libc++_shared.so), run-android.sh, and bench-android.sh.
+
+            Compiled with Arm KleidiAI enabled (`-DGGML_CPU_KLEIDIAI=ON`). Verified on a Realme P3 Ultra with MediaTek Dimensity 8350 Ultra, reaching 4.78 t/s generation at `-t 4`.
