@@ -63,10 +63,15 @@ jobs:
             echo "Missing executable wrapper: $dist/run-android.sh" >&2
             exit 1
           fi
-          if ! grep -Fq 'bin/llama-completion' "$dist/run-android.sh"; then
-            echo "Wrapper does not point to bin/llama-completion: $dist/run-android.sh" >&2
+          grep -Fq 'bin/llama-completion' "$dist/run-android.sh"
+          grep -Fq -- '-t 4' "$dist/run-android.sh"
+
+          if [[ ! -x "$dist/bench-android.sh" ]]; then
+            echo "Missing executable benchmark script: $dist/bench-android.sh" >&2
             exit 1
           fi
+          sh -n "$dist/bench-android.sh"
+          grep -Fq 'bin/llama-bench' "$dist/bench-android.sh"
 
           ls -lR "$dist"
       - uses: actions/upload-artifact@v4
@@ -74,3 +79,4 @@ jobs:
           name: littlebit-gguf-android-arm64
           path: dist/littlebit-gguf-android-arm64.tar.gz
           if-no-files-found: error
+          
