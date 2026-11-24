@@ -399,8 +399,8 @@ private fun InputBar(vm: ChatViewModel) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     FastThinkPill(
                         fastMode = vm.fastMode,
-                        onFast = { vm.fastMode = true },
-                        onThink = { vm.fastMode = false },
+                        onFast = { vm.setFastMode(true) },
+                        onThink = { vm.setFastMode(false) },
                     )
                     TextField(
                         value = vm.input,
