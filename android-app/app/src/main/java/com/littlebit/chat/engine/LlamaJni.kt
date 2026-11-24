@@ -18,6 +18,7 @@ internal object LlamaJni {
         nCtx: Int,
         nThreads: Int,
         nBatch: Int,
+        nGpuLayers: Int,
         progress: LlamaEngine.ProgressCallback?,
     ): Long
 
@@ -36,6 +37,22 @@ internal object LlamaJni {
     external fun nativeGenerate(
         handle: Long,
         prompt: String,
+        temperature: Double,
+        topK: Int,
+        repeatPenalty: Double,
+        dryMultiplier: Double,
+        maxTokens: Int,
+        seed: Long,
+        callback: LlamaEngine.TokenCallback,
+    ): Int
+
+    /**
+     * Continue sampling from the current KV-cache state without re-processing
+     * a prompt. Used to seamlessly finish a speculative pre-warm draft.
+     * Same return codes as [nativeGenerate].
+     */
+    external fun nativeContinueGenerate(
+        handle: Long,
         temperature: Double,
         topK: Int,
         repeatPenalty: Double,

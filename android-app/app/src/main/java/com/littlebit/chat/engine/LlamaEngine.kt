@@ -9,7 +9,9 @@ package com.littlebit.chat.engine
  *
  * Threading: [loadModel] and [generate] block the calling thread. Call them
  * from a background dispatcher (e.g. Dispatchers.Default); tokens stream back
- * through [onToken] on that same background thread.
+ * through [onToken] on that same background thread. Only one of
+ * [generate]/[continueGenerate] may run at a time — the ViewModel guards
+ * engine access with a Mutex.
  */
 class LlamaEngine {
 
@@ -67,15 +69,19 @@ class LlamaEngine {
         LlamaJni.nativeInit()
     }
 
-    /** Blocks. Loads a GGUF model (any standard quant or LittleBit Q1_0). */
+    /**
+     * Blocks. Loads a GGUF model (any standard quant or LittleBit Q1_0).
+     * [nGpuLayers] is plumbed for Vulkan GPU offload (v0.2); keep it 0 on CPU.
+     */
     fun loadModel(
         path: String,
         contextSize: Int = 4096,
         threads: Int = 4,
+        nGpuLayers: Int = 0,
         onProgress: ProgressCallback? = null,
     ): ModelInfo {
         check(handle == 0L) { "A model is already loaded. Unload it first." }
-        val h = LlamaJni.nativeLoadModel(path, contextSize, threads, 512, onProgress)
+        val h = LlamaJni.nativeLoadModel(path, contextSize, threads, 512, nGpuLayers, onProgress)
         check(h != 0L) { "nativeLoadModel returned 0" }
         handle = h
         return ModelInfo(
@@ -115,6 +121,22 @@ class LlamaEngine {
         prompt: String,
         params: SamplingParams = SamplingParams(),
         onToken: (String) -> Unit = {},
+    ): GenerateResult = runGeneration(prompt, params, onToken)
+
+    /**
+     * Continue generation from the current KV-cache state (no prompt feeding).
+     * Used after flushing a speculative pre-warm draft; falls back to
+     * [generate] if the native side reports an error.
+     */
+    fun continueGenerate(
+        params: SamplingParams = SamplingParams(),
+        onToken: (String) -> Unit = {},
+    ): GenerateResult = runGeneration(null, params, onToken)
+
+    private fun runGeneration(
+        prompt: String?,
+        params: SamplingParams,
+        onToken: (String) -> Unit,
     ): GenerateResult {
         check(handle != 0L) { "No model loaded" }
         isGenerating = true
@@ -138,11 +160,19 @@ class LlamaEngine {
                     // Surfaced through the result status / partial output.
                 }
             }
-            val status = LlamaJni.nativeGenerate(
-                handle, prompt,
-                params.temperature, params.topK, params.repeatPenalty, params.dryMultiplier,
-                params.maxTokens, params.seed, cb,
-            )
+            val status = if (prompt == null) {
+                LlamaJni.nativeContinueGenerate(
+                    handle,
+                    params.temperature, params.topK, params.repeatPenalty, params.dryMultiplier,
+                    params.maxTokens, params.seed, cb,
+                )
+            } else {
+                LlamaJni.nativeGenerate(
+                    handle, prompt,
+                    params.temperature, params.topK, params.repeatPenalty, params.dryMultiplier,
+                    params.maxTokens, params.seed, cb,
+                )
+            }
             GenerateResult(status, tokens, tps, output.toString())
         } finally {
             isGenerating = false

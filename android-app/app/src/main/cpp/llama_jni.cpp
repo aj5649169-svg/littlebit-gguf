@@ -38,10 +38,14 @@ jmethodID g_token_on_complete    = nullptr;
 jmethodID g_token_on_error       = nullptr;
 
 struct NativeEngine {
-    llama_model *       model = nullptr;
-    llama_context *     ctx   = nullptr;
-    const llama_vocab * vocab = nullptr;
+    llama_model *       model  = nullptr;
+    llama_context *     ctx    = nullptr;
+    const llama_vocab * vocab  = nullptr;
     std::atomic<bool>   stop{false};
+    // Number of tokens currently decoded in the KV cache. Tracked across
+    // nativeGenerate / nativeContinueGenerate so a speculative pre-warm can
+    // be flushed and seamlessly continued without re-processing the prompt.
+    int                 n_past = 0;
 };
 
 void throwIllegalState(JNIEnv * env, const std::string & msg) {
@@ -98,6 +102,114 @@ std::string tokenToPiece(const llama_vocab * vocab, llama_token token) {
     return std::string();
 }
 
+void callOnError(JNIEnv * env, jobject cb, const char * msg) {
+    if (g_token_on_error == nullptr) return;
+    jstring jmsg = env->NewStringUTF(msg);
+    env->CallVoidMethod(cb, g_token_on_error, jmsg);
+    env->DeleteLocalRef(jmsg);
+}
+
+struct SamplerOpts {
+    double temp;
+    int    top_k;
+    double repeat_penalty;
+    double dry_multiplier;
+    long   seed;
+};
+
+// Sampler chain: penalties -> DRY (optional) -> top-k -> temperature -> dist/greedy.
+llama_sampler * buildSampler(const llama_vocab * vocab, int n_vocab, const SamplerOpts & o) {
+    llama_sampler_chain_params sparams = llama_sampler_chain_default_params();
+    llama_sampler * chain = llama_sampler_chain_init(sparams);
+    llama_sampler_chain_add(chain, llama_sampler_init_penalties(
+            n_vocab, 64, static_cast<float>(o.repeat_penalty), 0.0f, 0.0f));
+    if (o.dry_multiplier > 0.0) {
+        static const char * breakers[] = {"\n", ":", "\"", "*"};
+        llama_sampler_chain_add(chain, llama_sampler_init_dry(
+                vocab, static_cast<float>(o.dry_multiplier), 1.75f, 2, 64, breakers, 4));
+    }
+    if (o.top_k > 0) {
+        llama_sampler_chain_add(chain, llama_sampler_init_top_k(o.top_k));
+    }
+    if (o.temp <= 0.0) {
+        llama_sampler_chain_add(chain, llama_sampler_init_greedy());
+    } else {
+        llama_sampler_chain_add(chain, llama_sampler_init_temp(static_cast<float>(o.temp)));
+        const uint32_t useed = o.seed >= 0
+            ? static_cast<uint32_t>(o.seed)
+            : static_cast<uint32_t>(std::chrono::high_resolution_clock::now()
+                                        .time_since_epoch().count());
+        llama_sampler_chain_add(chain, llama_sampler_init_dist(useed));
+    }
+    return chain;
+}
+
+// Sampling loop shared by nativeGenerate and nativeContinueGenerate.
+// Returns 0 finished, 1 stopped/aborted, 2 context full, -1 error.
+int runSamplingLoop(JNIEnv * env, NativeEngine * e, jobject cb,
+                    llama_sampler * chain, jint max_tokens) {
+    const int n_ctx   = static_cast<int>(llama_n_ctx(e->ctx));
+    const int n_vocab = static_cast<int>(llama_vocab_n_tokens(e->vocab));
+
+    const auto t0 = std::chrono::steady_clock::now();
+    int n_gen = 0;
+    int status = 0; // 0 = finished, 1 = stopped/aborted, 2 = context full
+    std::vector<llama_token_data> candidates(static_cast<size_t>(n_vocab));
+
+    while (!e->stop.load()) {
+        if (n_gen >= max_tokens) break;
+        if (e->n_past >= n_ctx - 1) {
+            status = 2;
+            callOnError(env, cb, "context window is full — start a new chat");
+            break;
+        }
+
+        float * logits = llama_get_logits_ith(e->ctx, -1);
+        if (logits == nullptr) {
+            callOnError(env, cb, "no logits available");
+            status = -1;
+            break;
+        }
+        for (int v = 0; v < n_vocab; v++) {
+            candidates[static_cast<size_t>(v)] = llama_token_data{v, logits[v], 0.0f};
+        }
+        llama_token_data_array cur{ candidates.data(), static_cast<size_t>(n_vocab), -1, false };
+        llama_sampler_apply(chain, &cur);
+        const llama_token tok = cur.data[cur.selected].id;
+        llama_sampler_accept(chain, tok);
+
+        if (llama_vocab_is_eog(e->vocab, tok)) break;
+
+        const std::string piece = tokenToPiece(e->vocab, tok);
+        if (!piece.empty()) {
+            jstring jpiece = env->NewStringUTF(piece.c_str());
+            env->CallVoidMethod(cb, g_token_on_token, jpiece);
+            env->DeleteLocalRef(jpiece);
+        }
+        n_gen++;
+
+        llama_batch_ext * b = llama_batch_ext_init(e->ctx);
+        const llama_pos pos = e->n_past;
+        const int idx = llama_batch_ext_add_token(b, 0, tok);
+        if (idx >= 0) {
+            llama_batch_ext_set_pos(b, idx, &pos);
+            llama_batch_ext_set_output_logits(b, idx, true);
+        }
+        const int rc = llama_process(e->ctx, LLAMA_PROCESS_TYPE_DECODE, b);
+        llama_batch_ext_free(b);
+        if (idx < 0 || rc != 0) {
+            status = 1;
+            break;
+        }
+        e->n_past++;
+    }
+
+    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const double tps = elapsed > 0.0 ? static_cast<double>(n_gen) / elapsed : 0.0;
+    env->CallVoidMethod(cb, g_token_on_complete, n_gen, tps);
+    return status;
+}
+
 } // namespace
 
 jint JNI_OnLoad(JavaVM * vm, void * /*reserved*/) {
@@ -134,7 +246,8 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeInit(JNIEnv * env, jclass) {
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_littlebit_chat_engine_LlamaJni_nativeLoadModel(
-        JNIEnv * env, jclass, jstring jpath, jint n_ctx, jint n_threads, jint n_batch, jobject jprogress) {
+        JNIEnv * env, jclass, jstring jpath, jint n_ctx, jint n_threads, jint n_batch,
+        jint n_gpu_layers, jobject jprogress) {
     try {
         const std::string path = toStdString(env, jpath);
         auto * engine = new NativeEngine();
@@ -147,7 +260,9 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeLoadModel(
         }
 
         llama_model_params mparams = llama_model_default_params();
-        mparams.n_gpu_layers = 0; // CPU-only inference, same as the Termux build (-ngl 0)
+        // Vulkan GPU offload lands in v0.2 (flip -DGGML_VULKAN=ON in CMake);
+        // until then n_gpu_layers is plumbed through but stays 0 (CPU + KleidiAI).
+        mparams.n_gpu_layers = n_gpu_layers;
         mparams.progress_callback = pst != nullptr ? progressThunk : nullptr;
         mparams.progress_callback_user_data = pst;
 
@@ -236,25 +351,32 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeFormatChat(
             msgs.push_back({role, content});
         }
 
+        // Prefer the GGUF-embedded chat template, but NEVER let it crash a turn:
+        // llama.cpp's --jinja path can throw std::out_of_range when prior
+        // assistant turns contain <think> blocks (multi-turn crash on Qwen3).
+        // Kotlin strips those blocks before formatting; the ChatML fallback
+        // below is the second line of defence so multi-turn NEVER crashes.
         const char * tmpl = llama_model_chat_template(e->model, nullptr);
         if (tmpl != nullptr) {
-            int32_t len = llama_chat_apply_template(tmpl, msgs.data(), msgs.size(), true, nullptr, 0);
-            if (len < 0) throw std::runtime_error("chat template failed");
-            std::vector<char> buf(static_cast<size_t>(len) + 16);
-            len = llama_chat_apply_template(tmpl, msgs.data(), msgs.size(), true,
-                                            buf.data(), static_cast<int32_t>(buf.size()));
-            if (len < 0) throw std::runtime_error("chat template failed");
-            return env->NewStringUTF(buf.data());
+            try {
+                int32_t len = llama_chat_apply_template(tmpl, msgs.data(), msgs.size(), true, nullptr, 0);
+                if (len < 0) throw std::runtime_error("chat template failed");
+                std::vector<char> buf(static_cast<size_t>(len) + 16);
+                len = llama_chat_apply_template(tmpl, msgs.data(), msgs.size(), true,
+                                                buf.data(), static_cast<int32_t>(buf.size()));
+                if (len < 0) throw std::runtime_error("chat template failed");
+                return env->NewStringUTF(buf.data());
+            } catch (const std::exception & ex) {
+                LOGE("chat template failed (%s); falling back to ChatML", ex.what());
+            }
         }
 
-        // Fallback for models without an embedded template.
+        // Safe ChatML fallback: <|im_start|>role\ncontent<|im_end|>\n ...
         std::string out;
-        if (!system_prompt.empty()) out += system_prompt + "\n\n";
         for (const auto & m : msgs) {
-            if (std::string(m.role) == "system") continue;
-            out += std::string("### ") + m.role + ":\n" + m.content + "\n\n";
+            out += "<|im_start|>" + std::string(m.role) + "\n" + m.content + "<|im_end|>\n";
         }
-        out += "### Assistant:\n";
+        out += "<|im_start|>assistant\n";
         return env->NewStringUTF(out.c_str());
     } catch (const std::exception & e) {
         throwIllegalState(env, e.what());
@@ -278,19 +400,19 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
     }
     jobject cb = env->NewGlobalRef(jcallback);
 
-    auto onError = [&](const char * msg) {
-        if (g_token_on_error == nullptr) return;
-        jstring jmsg = env->NewStringUTF(msg);
-        env->CallVoidMethod(cb, g_token_on_error, jmsg);
-        env->DeleteLocalRef(jmsg);
-    };
-
     try {
         e->stop.store(false);
         const std::string prompt = toStdString(env, jprompt);
         const int n_ctx   = static_cast<int>(llama_n_ctx(e->ctx));
         const int n_batch = static_cast<int>(llama_n_batch(e->ctx));
-        const int n_vocab = llama_vocab_n_tokens(e->vocab);
+        const int n_vocab = static_cast<int>(llama_vocab_n_tokens(e->vocab));
+
+        // Hermetic turns: clear the KV cache so every generate() call decodes
+        // the full templated prompt from position 0. This makes repeat calls
+        // (retries, pre-warm flushes that fell back) deterministic and keeps
+        // llama.cpp happy even after a speculative pre-warm warmed the cache.
+        llama_kv_cache_clear(e->ctx);
+        e->n_past = 0;
 
         // Tokenize the fully-templated prompt (special tokens parsed, BOS left to the template).
         std::vector<llama_token> prompt_tokens(prompt.size() + 8);
@@ -304,42 +426,25 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
                                       false, true);
         }
         if (n_prompt <= 0) {
-            onError("failed to tokenize prompt");
+            callOnError(env, cb, "failed to tokenize prompt");
             env->DeleteGlobalRef(cb);
             return -1;
         }
         prompt_tokens.resize(static_cast<size_t>(n_prompt));
         if (n_prompt > n_ctx - 4) {
-            onError("prompt is too long for the configured context size");
+            callOnError(env, cb, "prompt is too long for the configured context size");
             env->DeleteGlobalRef(cb);
             return -1;
         }
 
-        // Sampler chain: penalties -> DRY (optional) -> top-k -> temperature -> dist/greedy.
-        llama_sampler_chain_params sparams = llama_sampler_chain_default_params();
-        llama_sampler * chain = llama_sampler_chain_init(sparams);
-        llama_sampler_chain_add(chain, llama_sampler_init_penalties(
-                n_vocab, 64, static_cast<float>(repeat_penalty), 0.0f, 0.0f));
-        if (dry_multiplier > 0.0) {
-            static const char * breakers[] = {"\n", ":", "\"", "*"};
-            llama_sampler_chain_add(chain, llama_sampler_init_dry(
-                    e->vocab, static_cast<float>(dry_multiplier), 1.75f, 2, 64, breakers, 4));
-        }
-        if (top_k > 0) {
-            llama_sampler_chain_add(chain, llama_sampler_init_top_k(top_k));
-        }
-        if (temp <= 0.0) {
-            llama_sampler_chain_add(chain, llama_sampler_init_greedy());
-        } else {
-            llama_sampler_chain_add(chain, llama_sampler_init_temp(static_cast<float>(temp)));
-            const uint32_t useed = seed >= 0
-                ? static_cast<uint32_t>(seed)
-                : static_cast<uint32_t>(std::chrono::high_resolution_clock::now()
-                                            .time_since_epoch().count());
-            llama_sampler_chain_add(chain, llama_sampler_init_dist(useed));
-        }
+        SamplerOpts opts;
+        opts.temp           = temp;
+        opts.top_k          = top_k;
+        opts.repeat_penalty = repeat_penalty;
+        opts.dry_multiplier = dry_multiplier;
+        opts.seed           = static_cast<long>(seed);
+        llama_sampler * chain = buildSampler(e->vocab, n_vocab, opts);
 
-        int n_past = 0;
         bool failed = false;
 
         // Feed the prompt in chunks of n_batch.
@@ -347,7 +452,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
             const int chunk = std::min(n_batch, n_prompt - i0);
             llama_batch_ext * b = llama_batch_ext_init(e->ctx);
             for (int i = 0; i < chunk; i++) {
-                const llama_pos pos = n_past + i;
+                const llama_pos pos = e->n_past + i;
                 const int idx = llama_batch_ext_add_token(b, 0, prompt_tokens[static_cast<size_t>(i0 + i)]);
                 if (idx < 0) { failed = true; break; }
                 llama_batch_ext_set_pos(b, idx, &pos);
@@ -355,84 +460,75 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
             }
             if (failed) {
                 llama_batch_ext_free(b);
-                onError("failed to build decode batch");
+                callOnError(env, cb, "failed to build decode batch");
                 break;
             }
             const int rc = llama_process(e->ctx, LLAMA_PROCESS_TYPE_DECODE, b);
             llama_batch_ext_free(b);
             if (rc != 0) {
-                onError("prompt processing failed (out of memory or aborted)");
+                callOnError(env, cb, "prompt processing failed (out of memory or aborted)");
                 failed = true;
                 break;
             }
-            n_past += chunk;
+            e->n_past += chunk;
         }
 
-        const auto t0 = std::chrono::steady_clock::now();
-        int n_gen = 0;
-        int status = 0; // 0 = finished, 1 = stopped/aborted, 2 = context full
-        std::vector<llama_token_data> candidates(static_cast<size_t>(n_vocab));
-
-        while (!failed && !e->stop.load()) {
-            if (n_gen >= max_tokens) break;
-            if (n_past >= n_ctx - 1) {
-                status = 2;
-                onError("context window is full — start a new chat");
-                break;
-            }
-
-            float * logits = llama_get_logits_ith(e->ctx, -1);
-            if (logits == nullptr) {
-                onError("no logits available");
-                failed = true;
-                break;
-            }
-            for (int v = 0; v < n_vocab; v++) {
-                candidates[static_cast<size_t>(v)] = llama_token_data{v, logits[v], 0.0f};
-            }
-            llama_token_data_array cur{ candidates.data(), static_cast<size_t>(n_vocab), -1, false };
-            llama_sampler_apply(chain, &cur);
-            const llama_token tok = cur.data[cur.selected].id;
-            llama_sampler_accept(chain, tok);
-
-            if (llama_vocab_is_eog(e->vocab, tok)) break;
-
-            const std::string piece = tokenToPiece(e->vocab, tok);
-            if (!piece.empty()) {
-                jstring jpiece = env->NewStringUTF(piece.c_str());
-                env->CallVoidMethod(cb, g_token_on_token, jpiece);
-                env->DeleteLocalRef(jpiece);
-            }
-            n_gen++;
-
-            llama_batch_ext * b = llama_batch_ext_init(e->ctx);
-            const llama_pos pos = n_past;
-            const int idx = llama_batch_ext_add_token(b, 0, tok);
-            if (idx >= 0) {
-                llama_batch_ext_set_pos(b, idx, &pos);
-                llama_batch_ext_set_output_logits(b, idx, true);
-            }
-            const int rc = llama_process(e->ctx, LLAMA_PROCESS_TYPE_DECODE, b);
-            llama_batch_ext_free(b);
-            if (idx < 0 || rc != 0) {
-                status = 1;
-                break;
-            }
-            n_past++;
+        int status = 0;
+        if (!failed && !e->stop.load()) {
+            status = runSamplingLoop(env, e, cb, chain, max_tokens);
         }
-
         llama_sampler_free(chain);
 
-        const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        const double tps = elapsed > 0.0 ? static_cast<double>(n_gen) / elapsed : 0.0;
-        env->CallVoidMethod(cb, g_token_on_complete, n_gen, tps);
         env->DeleteGlobalRef(cb);
 
         if (failed) return -1;
         if (e->stop.load()) return 1;
         return status;
     } catch (const std::exception & ex) {
-        onError(ex.what());
+        callOnError(env, cb, ex.what());
+        env->DeleteGlobalRef(cb);
+        return -1;
+    }
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_littlebit_chat_engine_LlamaJni_nativeContinueGenerate(
+        JNIEnv * env, jclass, jlong handle,
+        jdouble temp, jint top_k, jdouble repeat_penalty, jdouble dry_multiplier,
+        jint max_tokens, jlong seed, jobject jcallback) {
+    auto * e = reinterpret_cast<NativeEngine *>(handle);
+    if (e == nullptr || e->ctx == nullptr) {
+        throwIllegalState(env, "no model loaded");
+        return -1;
+    }
+    if (jcallback == nullptr) {
+        throwIllegalState(env, "callback is null");
+        return -1;
+    }
+    jobject cb = env->NewGlobalRef(jcallback);
+
+    // Continue sampling from the current KV state (speculative pre-warm flush):
+    // no prompt re-processing, logits of the last decoded token are reused.
+    try {
+        e->stop.store(false);
+        const int n_vocab = static_cast<int>(llama_vocab_n_tokens(e->vocab));
+
+        SamplerOpts opts;
+        opts.temp           = temp;
+        opts.top_k          = top_k;
+        opts.repeat_penalty = repeat_penalty;
+        opts.dry_multiplier = dry_multiplier;
+        opts.seed           = static_cast<long>(seed);
+        llama_sampler * chain = buildSampler(e->vocab, n_vocab, opts);
+
+        const int status = runSamplingLoop(env, e, cb, chain, max_tokens);
+        llama_sampler_free(chain);
+        env->DeleteGlobalRef(cb);
+
+        if (e->stop.load()) return 1;
+        return status;
+    } catch (const std::exception & ex) {
+        callOnError(env, cb, ex.what());
         env->DeleteGlobalRef(cb);
         return -1;
     }
