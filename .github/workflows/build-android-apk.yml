@@ -1,0 +1,70 @@
+name: Build Android APK
+
+# NOTE: this file lives under ci/ because the automation token used to maintain
+# this branch is not allowed to write workflow files. To activate CI, copy it to
+#   .github/workflows/build-android-apk.yml
+# (content is exactly the intended workflow).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, android-app]
+    paths:
+      - 'android-app/**'
+      - 'patches/**'
+      - 'scripts/apply-patches.sh'
+      - '.github/workflows/build-android-apk.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: "26.1.10909125"
+      GRADLE_VERSION: "8.10"
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK components (platform, build-tools, NDK, CMake)
+        run: |
+          sdkmanager --install \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "platform-tools" \
+            "cmake;3.22.1" \
+            "ndk;${NDK_VERSION}"
+
+      - name: Apply llama.cpp patches (LittleBit Q1_0 + KleidiAI)
+        run: bash scripts/apply-patches.sh
+
+      - name: Install Gradle
+        run: |
+          wget -q "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -O /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d "$HOME"
+          echo "$HOME/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Generate Gradle wrapper & build debug APK
+        working-directory: android-app
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        run: |
+          gradle wrapper --gradle-version "${GRADLE_VERSION}" --distribution-type bin
+          ./gradlew --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: android-app/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
