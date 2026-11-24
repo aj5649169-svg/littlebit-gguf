@@ -153,6 +153,156 @@ The tests ran on an Intel Core i7-8550U with four threads in Ubuntu WSL2 using t
 
 The compressed projections use 0.6787 bits per dense projection weight, including both paths and the F32 input multipliers. Rank padding accounts for 56.7 MB of projection data. Conversion with `--validate 3` flushed 56 nonzero scales to zero and preserved FP16 subnormals.
 
+## Android (ARM64) Build, Conversion & Benchmark
+
+This workflow builds the Android runtime in GitHub Actions, converts the model in Google Colab, and runs the resulting GGUF on a non-rooted ARM64 Android phone through Termux. No Android NDK, C++ compiler, or large build toolchain is required on the phone or on your personal computer: the cross-compilation and model conversion happen in cloud environments.
+
+The steps below describe the checked-in [Android arm64 workflow](.github/workflows/build-android-arm64.yml), [Android build script](scripts/build-android.sh), and [Colab conversion notebook](notebooks/convert_littlebit_colab.ipynb).
+
+### 1. Cloud cross-compilation with GitHub Actions
+
+The **Android arm64** workflow can be started manually with `workflow_dispatch` or by pushing a `v*` tag. It checks out the repository and its llama.cpp submodule, then runs `scripts/build-android.sh` on a GitHub-hosted Ubuntu runner.
+
+The build script:
+
+- Applies the repository's llama.cpp patches (without applying a patch twice).
+- Uses the Android NDK CMake toolchain to target `arm64-v8a` with Android API level 28.
+- Builds Release shared libraries and the `llama-completion` and `llama-bench` executables.
+- Sets `-DGGML_CPU_KLEIDIAI=ON` and `-DGGML_NATIVE=OFF`. KleidiAI support is enabled without compiling for the build runner's own CPU, allowing the Android binary to use runtime CPU-feature dispatch rather than requiring a device-specific build. The tested phone reports features including `asimddp` and `i8mm`.
+- Disables the server and app targets with `-DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_APP=OFF`, and also disables tests.
+- Collects the required shared libraries in the package's `lib/` directory. It checks ELF architecture and includes Android NDK `libc++_shared.so` when a binary has that runtime dependency.
+
+The workflow validates the two executables and packaged shared libraries before uploading the `littlebit-gguf-android-arm64` artifact. The downloaded GitHub Actions artifact is a ZIP containing `littlebit-gguf-android-arm64.tar.gz`.
+
+To build it:
+
+1. Open [Actions → Android arm64](https://github.com/aj5649169-svg/littlebit-gguf/actions/workflows/build-android-arm64.yml).
+2. Select **Run workflow**, keep the default branch selected, and start the workflow.
+3. Wait for the run to finish successfully, open that run, and download the `littlebit-gguf-android-arm64` artifact ZIP.
+
+The archive contains this layout:
+
+```text
+littlebit-gguf-android-arm64/
+├── bin/
+│   ├── llama-completion
+│   └── llama-bench
+├── lib/
+│   └── *.so
+├── run-android.sh
+└── bench-android.sh
+```
+
+`run-android.sh` sets `LD_LIBRARY_PATH=./lib` (relative to the package directory) and launches `bin/llama-completion`. It defaults to `-t 4` when no thread option is supplied. Pass `-t 2` or `--threads 2` explicitly to override that default.
+
+`bench-android.sh` prints the device SoC, Android release and SDK, and the CPU `Features` line from `/proc/cpuinfo`. It then runs `llama-bench` with CPU-only inference (`-ngl 0`) at prompt length 128 and generation length 32, repeating each measurement three times, for thread counts 2, 4, 6, and 8.
+
+### 2. Convert the model in Google Colab
+
+Open [`notebooks/convert_littlebit_colab.ipynb` in Google Colab](https://colab.research.google.com/github/aj5649169-svg/littlebit-gguf/blob/main/notebooks/convert_littlebit_colab.ipynb) and run the cells from top to bottom.
+
+The notebook downloads `LittleBitLLM/littlebit-qwen3-8b-0.55bpw`, builds the CPU conversion/quantization tools in the Colab runtime, and writes:
+
+```text
+/content/littlebit-qwen3-8b-q4_k.gguf
+```
+
+The conversion uses `--embd-type q4_k --output-type q4_k` and `--validate 2`. The final notebook cells print the produced file's actual size and optionally mount Google Drive and copy it to:
+
+```text
+MyDrive/littlebit-qwen3-8b-q4_k.gguf
+```
+
+The notebook's introductory note estimates an output around 1.5 GB; the exact file size is printed by the notebook and can vary with checkpoint details. Keep this separate from the approximately **1.20 GiB loaded footprint** observed in the Android benchmark below. The checkpoint is distributed under **CC BY-NC 4.0**; respect its non-commercial restriction and the checkpoint's license terms when using or sharing the model.
+
+> **Notebook source note:** The checked-in notebook currently clones `https://github.com/GeniusDevam/littlebit-gguf.git` when preparing its Colab runtime. This is the upstream repository URL encoded in the notebook; the Android Actions workflow described above runs from this fork.
+
+### 3. Set up Termux on a non-rooted Android phone
+
+Install **Termux from F-Droid**, not the Google Play build. This procedure does not require root access or changes to the Android system partition. The required files are the downloaded Actions artifact ZIP and the converted GGUF model, both placed in the phone's `Download` folder.
+
+For clarity, the artifact ZIP should be named `littlebit-gguf-android-arm64.zip`. In Termux, grant shared-storage access and unpack the two archive layers:
+
+```bash
+termux-setup-storage
+mkdir -p ~/littlebit && cd ~/littlebit
+unzip ~/storage/downloads/littlebit-gguf-android-arm64.zip
+tar -xzf littlebit-gguf-android-arm64.tar.gz
+cd littlebit-gguf-android-arm64
+```
+
+After extraction, the model remains in Android's shared Downloads directory and the executables and libraries are in the current package directory. No compiler, NDK, or root shell is needed on the phone.
+
+### 4. Run the benchmark sweep
+
+In Termux, run the packaged sweep script:
+
+```bash
+LD_PRELOAD= sh bench-android.sh ~/storage/downloads/littlebit-qwen3-8b-q4_k.gguf --progress
+```
+
+The empty `LD_PRELOAD=` assignment is intentional in Termux: it avoids inherited preload settings that can cause conflicts with the Android NDK runtime libraries. The script passes `--progress` through to `llama-bench` and performs the four thread-count runs.
+
+The underlying benchmark configuration is:
+
+```bash
+llama-bench -ngl 0 -p 128 -n 32 -r 3
+```
+
+The sweep also supplies the model path and varies `-t` across `2`, `4`, `6`, and `8`.
+
+To run an interactive completion separately, the wrapper can be used directly; for example:
+
+```bash
+LD_PRELOAD= ./run-android.sh -m ~/storage/downloads/littlebit-qwen3-8b-q4_k.gguf -ngl 0 -t 4 -no-cnv --repeat-penalty 1.18 --dry-multiplier 0.8 -p "Once upon a time" -n 128
+```
+
+The wrapper automatically adds `-t 4` only when neither `-t` nor `--threads` was supplied.
+
+### Verified Android benchmark: Realme P3 Ultra
+
+The following are measured results from a **Realme P3 Ultra** running non-rooted Termux on Android 16. They are device-specific measurements, not guaranteed throughput for every ARM64 phone.
+
+| Item | Measured configuration |
+| --- | --- |
+| Device | Realme P3 Ultra |
+| SoC | MediaTek Dimensity 8350 Ultra (MT6897) |
+| CPU topology | 4× Cortex-A715 performance cores + 4× Cortex-A510 efficiency cores |
+| OS | Android 16 (SDK 36) |
+| Environment | Non-rooted Termux |
+| Detected CPU features | `asimddp`, `i8mm`, `sve`, `sve2`, `svei8mm`, `bf16` |
+| Model | `LittleBitLLM/littlebit-qwen3-8b-0.55bpw` |
+| Model format | Qwen3 8B, Q1_0 projection tensors, Q4_K embeddings/output via `--embd-type q4_k` |
+| Loaded footprint | Approximately 1.20 GiB |
+| Benchmark | `llama-bench -ngl 0 -p 128 -n 32 -r 3` |
+
+#### Results by thread count
+
+| Threads | Prompt processing (pp128) | Generation (tg32) | Notes |
+| --- | ---: | ---: | --- |
+| `-t 2` | 1.86 ± 0.03 t/s | 1.67 ± 0.03 t/s | Half of the big cores |
+| `-t 4` | **5.62 ± 0.25 t/s** | **4.78 ± 0.06 t/s** | **Best overall; matches the 4× Cortex-A715 performance-core count** |
+| `-t 6` | 4.94 ± 0.20 t/s | 1.69 ± 0.05 t/s | Adds work on the Cortex-A510 efficiency cores |
+| `-t 8` | 5.26 ± 0.13 t/s | 2.07 ± 0.05 t/s | Efficiency-core contention/bottleneck |
+
+**Termux benchmark output**
+
+![Realme P3 Ultra Termux llama-bench results](docs/images/realme-p3-ultra-benchmark.jpg)
+
+**Successful GitHub Actions Android ARM64 build**
+
+![GitHub Actions Android ARM64 build](docs/images/github-actions-android-build.jpg)
+
+Upload the two screenshots to the repository using the exact paths above. Until those files are committed, GitHub will show these image references as missing.
+
+### Engineering findings
+
+- **Four threads are the best generation setting on this device.** The `-t 4` run reaches 4.78 t/s. Compared with `-t 6` and `-t 8`, that is approximately 2.8× and 2.3× faster generation, respectively. Four worker threads align with the four Cortex-A715 performance cores; adding threads brings the slower Cortex-A510 cores into the workload and reduces generation throughput.
+- **KleidiAI accelerates supported tensor operations, not every tensor type.** Runtime logs report `KLEIDIAI = 1` for the supported Q4_K embedding/output operations. The Q1_0 projection tensors report that no KleidiAI kernel is available for `q1_0`; those operations fall back to the regular ARM NEON path. This is an expected fallback, not a build failure.
+- **The checkpoint is an early research checkpoint, not a general-purpose chat model.** `littlebit-qwen3-8b-0.55bpw` is an early 0.5-epoch checkpoint compressed to 0.55 bits per weight. It demonstrates a sub-1-bit model footprint and mobile CPU inference, but its current quality is not suitable for general reasoning or chat. For raw completion, `-no-cnv` with `--repeat-penalty 1.18 --dry-multiplier 0.8` helps prevent repetitive token loops; it does not turn the research checkpoint into a fully trained assistant model.
+
+---
+
 ## Related work
 
 - LittleBit: [arXiv:2506.13771](https://arxiv.org/abs/2506.13771). LittleBit-2: [arXiv:2603.00042](https://arxiv.org/abs/2603.00042).
