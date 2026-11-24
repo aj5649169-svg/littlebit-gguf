@@ -73,19 +73,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------ fast / think
     /** Fast mode appends /no_think and hides the thought-process accordion. */
     var fastMode by mutableStateOf(settings.fastMode)
-        set(v) {
-            field = v
-            settings.fastMode = v
-            cancelPrewarm()
-        }
+        private set
+
+    fun setFastMode(enabled: Boolean) {
+        if (fastMode == enabled) return
+        fastMode = enabled
+        settings.fastMode = enabled
+        cancelPrewarm()
+    }
 
     // ---------------------------------------------------- speculative pre-warm
     var instantReply by mutableStateOf(settings.instantReply)
-        set(v) {
-            field = v
-            settings.instantReply = v
-            if (!v) cancelPrewarm()
-        }
+        private set
+
+    fun setInstantReply(enabled: Boolean) {
+        if (instantReply == enabled) return
+        instantReply = enabled
+        settings.instantReply = enabled
+        if (!enabled) cancelPrewarm()
+    }
 
     var preWarming by mutableStateOf(false)
         private set
