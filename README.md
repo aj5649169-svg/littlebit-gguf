@@ -293,8 +293,6 @@ The following are measured results from a **Realme P3 Ultra** running non-rooted
 
 ![GitHub Actions Android ARM64 build](docs/images/github-actions-android-build.jpg)
 
-Upload the two screenshots to the repository using the exact paths above. Until those files are committed, GitHub will show these image references as missing.
-
 ### Engineering findings
 
 - **Four threads are the best generation setting on this device.** The `-t 4` run reaches 4.78 t/s. Compared with `-t 6` and `-t 8`, that is approximately 2.8× and 2.3× faster generation, respectively. Four worker threads align with the four Cortex-A715 performance cores; adding threads brings the slower Cortex-A510 cores into the workload and reduces generation throughput.
