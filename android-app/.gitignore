@@ -1,0 +1,12 @@
+# LittleBit Chat Android app
+*.iml
+.idea/
+.gradle/
+local.properties
+build/
+*/build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.keystore
+!debug.keystore
