@@ -58,9 +58,35 @@ void throwIllegalState(JNIEnv * env, const std::string & msg) {
 
 std::string toStdString(JNIEnv * env, jstring s) {
     if (s == nullptr) return std::string();
-    const char * chars = env->GetStringUTFChars(s, nullptr);
-    std::string out(chars != nullptr ? chars : "");
-    if (chars != nullptr) env->ReleaseStringUTFChars(s, chars);
+    const jsize length = env->GetStringLength(s);
+    const jchar * chars = env->GetStringChars(s, nullptr);
+    if (chars == nullptr) return std::string();
+    std::string out;
+    out.reserve(static_cast<size_t>(length) * 3);
+    for (jsize i = 0; i < length; ++i) {
+        uint32_t cp = chars[i];
+        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < length
+            && chars[i + 1] >= 0xDC00 && chars[i + 1] <= 0xDFFF) {
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (chars[++i] - 0xDC00);
+        } else if (cp >= 0xD800 && cp <= 0xDFFF) {
+            cp = 0xFFFD;
+        }
+        if (cp <= 0x7F) out.push_back(static_cast<char>(cp));
+        else if (cp <= 0x7FF) {
+            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else if (cp <= 0xFFFF) {
+            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else {
+            out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        }
+    }
+    env->ReleaseStringChars(s, chars);
     return out;
 }
 
@@ -359,7 +385,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeModelDesc(JNIEnv * env, jclass, jl
     if (e == nullptr || e->model == nullptr) return nullptr;
     char buf[256];
     llama_model_desc(e->model, buf, sizeof(buf));
-    return env->NewStringUTF(buf);
+    return utf8ToJString(env, std::string(buf));
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -418,7 +444,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeFormatChat(
                 len = llama_chat_apply_template(tmpl, msgs.data(), msgs.size(), true,
                                                 buf.data(), static_cast<int32_t>(buf.size()));
                 if (len < 0) throw std::runtime_error("chat template failed");
-                return env->NewStringUTF(buf.data());
+                return utf8ToJString(env, std::string(buf.data(), static_cast<size_t>(len)));
             } catch (const std::exception & ex) {
                 LOGE("chat template failed (%s); falling back to ChatML", ex.what());
             }
@@ -430,7 +456,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeFormatChat(
             out += "<|im_start|>" + std::string(m.role) + "\n" + m.content + "<|im_end|>\n";
         }
         out += "<|im_start|>assistant\n";
-        return env->NewStringUTF(out.c_str());
+        return utf8ToJString(env, out);
     } catch (const std::exception & e) {
         throwIllegalState(env, e.what());
         return nullptr;
