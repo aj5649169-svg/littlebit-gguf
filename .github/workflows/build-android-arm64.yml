@@ -27,21 +27,14 @@ jobs:
       - name: Verify packaged binaries
         run: |
           dist=dist/littlebit-gguf-android-arm64
-          app_bin=
-          for name in llama llama-app; do
-            if [[ -x "$dist/bin/$name" ]]; then
-              app_bin="$dist/bin/$name"
-              break
+
+          for name in llama-completion llama-bench; do
+            if [[ ! -x "$dist/bin/$name" ]]; then
+              echo "Missing executable binary: $dist/bin/$name" >&2
+              exit 1
             fi
           done
-          if [[ -z "$app_bin" ]]; then
-            echo "No llama or llama-app binary found in $dist/bin" >&2
-            exit 1
-          fi
-          if [[ ! -x "$dist/bin/llama-bench" ]]; then
-            echo "No llama-bench binary found in $dist/bin" >&2
-            exit 1
-          fi
+
           while IFS= read -r -d '' binary; do
             description="$(file -b "$binary")"
             printf '%s: %s\n' "$binary" "$description"
@@ -49,6 +42,32 @@ jobs:
               && "$description" == *"ARM aarch64"* \
               && "$description" == *"executable"* ]]
           done < <(find "$dist/bin" -maxdepth 1 -type f -executable -print0)
+
+          libs=()
+          while IFS= read -r -d '' library; do
+            libs+=("$library")
+          done < <(find -L "$dist/lib" -maxdepth 1 -name '*.so*' -type f -print0)
+          if [[ ${#libs[@]} -eq 0 ]]; then
+            echo "No shared libraries found in $dist/lib" >&2
+            exit 1
+          fi
+          for library in "${libs[@]}"; do
+            description="$(file -b "$library")"
+            printf '%s: %s\n' "$library" "$description"
+            [[ "$description" == *"ELF 64-bit"* \
+              && "$description" == *"ARM aarch64"* \
+              && "$description" == *"shared object"* ]]
+          done
+
+          if [[ ! -x "$dist/run-android.sh" ]]; then
+            echo "Missing executable wrapper: $dist/run-android.sh" >&2
+            exit 1
+          fi
+          if ! grep -Fq 'bin/llama-completion' "$dist/run-android.sh"; then
+            echo "Wrapper does not point to bin/llama-completion: $dist/run-android.sh" >&2
+            exit 1
+          fi
+
           ls -lR "$dist"
       - uses: actions/upload-artifact@v4
         with:
