@@ -47,6 +47,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -84,15 +85,24 @@ fun ChatScreen(
     onOpenSettings: () -> Unit,
 ) {
     val listState = rememberLazyListState()
+    val isAtBottom by remember { derivedStateOf { !listState.canScrollForward } }
+    var autoScrollEnabled by remember { mutableStateOf(true) }
+    val totalItemCount =
+        (if (vm.chatError != null) 1 else 0) +
+            vm.currentMessages.size +
+            (if (vm.streamActive) 1 else 0) +
+            (if (vm.currentMessages.isEmpty() && !vm.streamActive) 1 else 0) + 1
 
-    LaunchedEffect(vm.currentMessages.size) {
-        if (vm.currentMessages.isNotEmpty()) {
-            listState.animateScrollToItem(vm.currentMessages.size)
+    LaunchedEffect(listState.isScrollInProgress, isAtBottom) {
+        if (listState.isScrollInProgress && !isAtBottom) {
+            autoScrollEnabled = false
+        } else if (isAtBottom) {
+            autoScrollEnabled = true
         }
     }
-    LaunchedEffect(vm.rawStream.length) {
-        if (vm.currentMessages.isNotEmpty() || vm.rawStream.isNotEmpty()) {
-            listState.scrollToItem(vm.currentMessages.size)
+    LaunchedEffect(totalItemCount, vm.rawStream.length, autoScrollEnabled) {
+        if (autoScrollEnabled && !listState.isScrollInProgress && totalItemCount > 0) {
+            listState.scrollToItem(totalItemCount - 1)
         }
     }
 
@@ -178,6 +188,7 @@ fun ChatScreen(
                     }
                 }
             }
+            item(key = "bottom_spacer") { Spacer(Modifier.height(1.dp)) }
         }
     }
 }
@@ -306,6 +317,13 @@ private fun AssistantMetaRow(vm: ChatViewModel) {
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.padding(top = 8.dp),
     ) {
+        if (vm.isLoaded) {
+            BadgeChip(
+                text = vm.activeBackendLabel,
+                color = if (vm.isUsingVulkan) MaterialTheme.colorScheme.tertiary
+                    else MaterialTheme.colorScheme.secondary,
+            )
+        }
         BadgeChip(
             text = "%.1f t/s · %d tokens".format(vm.lastTps, vm.lastTokens),
             color = MaterialTheme.colorScheme.primary,
