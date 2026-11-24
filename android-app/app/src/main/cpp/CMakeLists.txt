@@ -61,6 +61,36 @@ set(BUILD_SHARED_LIBS      OFF  CACHE BOOL "" FORCE)  # static libs linked into 
 set(GGML_NATIVE            OFF  CACHE BOOL "" FORCE)
 set(GGML_CPU_KLEIDIAI      ON   CACHE BOOL "" FORCE)
 set(GGML_OPENMP            OFF  CACHE BOOL "" FORCE)
+set(GGML_VULKAN            ON   CACHE BOOL "" FORCE)
+
+if(ANDROID)
+    # The SDK headers + glslc are host tools; link the Android platform loader.
+    if(NOT Vulkan_INCLUDE_DIR AND DEFINED ENV{VULKAN_SDK})
+        set(Vulkan_INCLUDE_DIR "$ENV{VULKAN_SDK}/include" CACHE PATH "Host Vulkan headers" FORCE)
+    endif()
+    if(NOT Vulkan_GLSLC_EXECUTABLE AND DEFINED ENV{VULKAN_GLSLC_EXECUTABLE})
+        set(Vulkan_GLSLC_EXECUTABLE "$ENV{VULKAN_GLSLC_EXECUTABLE}" CACHE FILEPATH "Host glslc" FORCE)
+    endif()
+    if(NOT Vulkan_GLSLC_EXECUTABLE AND DEFINED ENV{VULKAN_SDK})
+        set(Vulkan_GLSLC_EXECUTABLE "$ENV{VULKAN_SDK}/bin/glslc" CACHE FILEPATH "Host glslc" FORCE)
+    endif()
+    if(NOT Vulkan_INCLUDE_DIR OR NOT EXISTS "${Vulkan_INCLUDE_DIR}/vulkan/vulkan.h")
+        message(FATAL_ERROR "Vulkan headers missing: install host LunarG SDK and set VULKAN_SDK.")
+    endif()
+    if(NOT Vulkan_GLSLC_EXECUTABLE OR NOT EXISTS "${Vulkan_GLSLC_EXECUTABLE}")
+        message(FATAL_ERROR "Modern host glslc missing: set VULKAN_GLSLC_EXECUTABLE to SDK glslc.")
+    endif()
+
+    find_library(ANDROID_VULKAN_LIBRARY NAMES vulkan
+        PATHS
+            "${CMAKE_SYSROOT}/usr/lib/aarch64-linux-android/${CMAKE_SYSTEM_VERSION}"
+            "${CMAKE_SYSROOT}/usr/lib/aarch64-linux-android"
+        NO_DEFAULT_PATH)
+    if(NOT ANDROID_VULKAN_LIBRARY)
+        message(FATAL_ERROR "Android NDK libvulkan.so missing for arm64-v8a / android-28.")
+    endif()
+    set(Vulkan_LIBRARY "${ANDROID_VULKAN_LIBRARY}" CACHE FILEPATH "Android Vulkan loader" FORCE)
+endif()
 set(GGML_LLAMAFILE         OFF  CACHE BOOL "" FORCE)
 set(GGML_BACKEND_DL        OFF  CACHE BOOL "" FORCE)
 set(GGML_CPU_ALL_VARIANTS  OFF  CACHE BOOL "" FORCE)
@@ -83,7 +113,8 @@ add_subdirectory(${LLAMA_CPP_DIR} ${CMAKE_CURRENT_BINARY_DIR}/llama.cpp)
 add_library(llama_jni SHARED llama_jni.cpp)
 
 target_include_directories(llama_jni PRIVATE
-    ${LLAMA_CPP_DIR}/include)
+    ${LLAMA_CPP_DIR}/include
+    ${LLAMA_CPP_DIR}/ggml/include)
 
 # `log` resolves the Run #2 linker error (__android_log_print from
 # logToAndroid); `android` is linked for future native glue. The previous
@@ -92,7 +123,8 @@ target_include_directories(llama_jni PRIVATE
 target_link_libraries(llama_jni PRIVATE
     llama
     log
-    android)
+    android
+    ${ANDROID_VULKAN_LIBRARY})
 
 target_compile_options(llama_jni PRIVATE -O3)
 

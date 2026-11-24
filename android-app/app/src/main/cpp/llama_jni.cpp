@@ -9,6 +9,7 @@
 #include <android/log.h>
 
 #include <llama.h>
+#include <ggml-backend.h>
 
 #include <algorithm>
 #include <atomic>
@@ -16,6 +17,7 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -46,6 +48,10 @@ struct NativeEngine {
     // nativeGenerate / nativeContinueGenerate so a speculative pre-warm can
     // be flushed and seamlessly continued without re-processing the prompt.
     int                 n_past = 0;
+    int                 gpu_layers = 0;
+    // UTF-8 code points may span token-piece boundaries or a speculative
+    // generate/continue boundary. Keep incomplete bytes here until complete.
+    std::string         pending_utf8;
 };
 
 void throwIllegalState(JNIEnv * env, const std::string & msg) {
@@ -169,6 +175,97 @@ jstring utf8ToJString(JNIEnv * env, const std::string & input) {
     return env->NewString(out.data(), static_cast<jsize>(out.size()));
 }
 
+
+size_t completeUtf8PrefixLength(const std::string & bytes) {
+    size_t i = 0;
+    while (i < bytes.size()) {
+        const auto lead = static_cast<unsigned char>(bytes[i]);
+        size_t width = 0;
+        if (lead <= 0x7F) width = 1;
+        else if (lead >= 0xC2 && lead <= 0xDF) width = 2;
+        else if (lead >= 0xE0 && lead <= 0xEF) width = 3;
+        else if (lead >= 0xF0 && lead <= 0xF4) width = 4;
+        else { ++i; continue; }
+
+        if (bytes.size() - i < width) {
+            bool onlyContinuationTail = true;
+            for (size_t j = i + 1; j < bytes.size(); ++j) {
+                if ((static_cast<unsigned char>(bytes[j]) & 0xC0) != 0x80) {
+                    onlyContinuationTail = false;
+                    break;
+                }
+            }
+            if (onlyContinuationTail) return i;
+            ++i;
+            continue;
+        }
+
+        bool valid = true;
+        for (size_t j = 1; j < width; ++j) {
+            if ((static_cast<unsigned char>(bytes[i + j]) & 0xC0) != 0x80) {
+                valid = false;
+                break;
+            }
+        }
+        if (valid && width == 3) {
+            const auto second = static_cast<unsigned char>(bytes[i + 1]);
+            valid = !((lead == 0xE0 && second < 0xA0) ||
+                      (lead == 0xED && second >= 0xA0));
+        } else if (valid && width == 4) {
+            const auto second = static_cast<unsigned char>(bytes[i + 1]);
+            valid = !((lead == 0xF0 && second < 0x90) ||
+                      (lead == 0xF4 && second > 0x8F));
+        }
+        i += valid ? width : 1;
+    }
+    return i;
+}
+
+bool deliverUtf8(JNIEnv * env, jobject callback, const std::string & bytes) {
+    if (bytes.empty()) return true;
+    jstring piece = utf8ToJString(env, bytes);
+    if (piece == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    env->CallVoidMethod(callback, g_token_on_token, piece);
+    const bool failed = env->ExceptionCheck();
+    if (failed) env->ExceptionClear();
+    env->DeleteLocalRef(piece);
+    return !failed;
+}
+
+bool appendUtf8Piece(JNIEnv * env, jobject callback, std::string & pending,
+                     const std::string & piece) {
+    pending.append(piece);
+    const size_t complete = completeUtf8PrefixLength(pending);
+    if (complete == 0) return true;
+    const std::string ready = pending.substr(0, complete);
+    pending.erase(0, complete);
+    return deliverUtf8(env, callback, ready);
+}
+
+bool flushUtf8Tail(JNIEnv * env, jobject callback, std::string & pending) {
+    if (pending.empty()) return true;
+    const size_t complete = completeUtf8PrefixLength(pending);
+    std::string ready = pending.substr(0, complete);
+    if (complete < pending.size()) ready.append("\xEF\xBF\xBD");
+    pending.clear();
+    return deliverUtf8(env, callback, ready);
+}
+
+bool hasVulkanComputeDevice() {
+    try {
+        ggml_backend_reg_t vulkan = ggml_backend_reg_by_name("Vulkan");
+        return vulkan != nullptr && ggml_backend_reg_dev_count(vulkan) > 0;
+    } catch (const std::exception & e) {
+        LOGE("Vulkan device probe failed: %s", e.what());
+    } catch (...) {
+        LOGE("Vulkan device probe failed with an unknown error");
+    }
+    return false;
+}
+
 void callOnError(JNIEnv * env, jobject cb, const char * msg) {
     if (g_token_on_error == nullptr) return;
     jstring jmsg = utf8ToJString(env, std::string(msg));
@@ -223,6 +320,7 @@ int runSamplingLoop(JNIEnv * env, NativeEngine * e, jobject cb,
     const auto t0 = std::chrono::steady_clock::now();
     int n_gen = 0;
     int status = 0; // 0 = finished, 1 = stopped/aborted, 2 = context full
+    bool reachedEog = false;
     std::vector<llama_token_data> candidates(static_cast<size_t>(n_vocab));
 
     while (!e->stop.load()) {
@@ -247,21 +345,15 @@ int runSamplingLoop(JNIEnv * env, NativeEngine * e, jobject cb,
         const llama_token tok = cur.data[cur.selected].id;
         llama_sampler_accept(chain, tok);
 
-        if (llama_vocab_is_eog(e->vocab, tok)) break;
+        if (llama_vocab_is_eog(e->vocab, tok)) {
+            reachedEog = true;
+            break;
+        }
 
         const std::string piece = tokenToPiece(e->vocab, tok);
-        if (!piece.empty()) {
-            jstring jpiece = utf8ToJString(env, piece);
-            if (jpiece == nullptr) {
-                if (env->ExceptionCheck()) env->ExceptionClear();
-                status = -1;
-                break;
-            }
-            env->CallVoidMethod(cb, g_token_on_token, jpiece);
-            const bool callbackFailed = env->ExceptionCheck();
-            if (callbackFailed) env->ExceptionClear();
-            env->DeleteLocalRef(jpiece);
-            if (callbackFailed) { status = -1; break; }
+        if (!piece.empty() && !appendUtf8Piece(env, cb, e->pending_utf8, piece)) {
+            status = -1;
+            break;
         }
         n_gen++;
 
@@ -281,6 +373,8 @@ int runSamplingLoop(JNIEnv * env, NativeEngine * e, jobject cb,
         }
         e->n_past++;
     }
+
+    if (reachedEog && !flushUtf8Tail(env, cb, e->pending_utf8)) status = -1;
 
     const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     const double tps = elapsed > 0.0 ? static_cast<double>(n_gen) / elapsed : 0.0;
@@ -329,50 +423,86 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeLoadModel(
         jint n_gpu_layers, jobject jprogress) {
     try {
         const std::string path = toStdString(env, jpath);
-        auto * engine = new NativeEngine();
+        auto engine = std::make_unique<NativeEngine>();
 
-        ProgressState * pst = nullptr;
         jobject progress_ref = nullptr;
+        std::unique_ptr<ProgressState> pst;
         if (jprogress != nullptr) {
             progress_ref = env->NewGlobalRef(jprogress);
-            pst = new ProgressState{env, progress_ref};
+            if (progress_ref == nullptr) {
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                throw std::runtime_error("could not retain model-load progress callback");
+            }
+            pst = std::make_unique<ProgressState>(ProgressState{env, progress_ref});
         }
 
-        llama_model_params mparams = llama_model_default_params();
-        // Vulkan GPU offload lands in v0.2 (flip -DGGML_VULKAN=ON in CMake);
-        // until then n_gpu_layers is plumbed through but stays 0 (CPU + KleidiAI).
-        mparams.n_gpu_layers = n_gpu_layers;
-        mparams.progress_callback = pst != nullptr ? progressThunk : nullptr;
-        mparams.progress_callback_user_data = pst;
-
-        engine->model = llama_model_load_from_file(path.c_str(), mparams);
-
-        if (pst != nullptr) {
-            env->DeleteGlobalRef(progress_ref);
-            delete pst;
+        const int requested_gpu_layers = std::max(0, static_cast<int>(n_gpu_layers));
+        const bool vulkan_ready = requested_gpu_layers > 0 && hasVulkanComputeDevice();
+        if (requested_gpu_layers > 0 && !vulkan_ready) {
+            LOGE("Vulkan offload requested without a usable Vulkan compute device; falling back to CPU/KleidiAI");
         }
-        if (engine->model == nullptr) {
-            delete engine;
-            throw std::runtime_error("failed to load model: " + path);
-        }
-        engine->vocab = llama_model_get_vocab(engine->model);
 
-        // Defaults: 4096 context / 4 threads (Big.LITTLE big cores) / 512 batch —
-        // OOM-safe on 6 GB phones, matching scripts/build-android.sh guidance.
-        llama_context_params cparams = llama_context_default_params();
-        cparams.n_ctx           = n_ctx > 0 ? static_cast<uint32_t>(n_ctx) : 4096;
-        cparams.n_batch         = n_batch > 0 ? static_cast<uint32_t>(n_batch) : 512;
-        cparams.n_ubatch        = cparams.n_batch;
-        cparams.n_threads       = n_threads;
-        cparams.n_threads_batch = n_threads;
+        const int attempts[] = { vulkan_ready ? requested_gpu_layers : 0, 0 };
+        const size_t attempt_count = vulkan_ready ? 2 : 1;
+        std::string last_error = "unknown model load failure";
+        bool loaded = false;
 
-        engine->ctx = llama_init_from_model(engine->model, cparams);
-        if (engine->ctx == nullptr) {
-            llama_model_free(engine->model);
-            delete engine;
-            throw std::runtime_error("failed to create llama context (out of memory?)");
+        for (size_t attempt = 0; attempt < attempt_count; ++attempt) {
+            const int layers = attempts[attempt];
+            try {
+                llama_model_params mparams = llama_model_default_params();
+                mparams.n_gpu_layers = layers;
+                mparams.progress_callback = pst ? progressThunk : nullptr;
+                mparams.progress_callback_user_data = pst.get();
+
+                engine->model = llama_model_load_from_file(path.c_str(), mparams);
+                if (engine->model == nullptr) {
+                    throw std::runtime_error("llama_model_load_from_file returned null");
+                }
+                engine->vocab = llama_model_get_vocab(engine->model);
+
+                llama_context_params cparams = llama_context_default_params();
+                cparams.n_ctx           = n_ctx > 0 ? static_cast<uint32_t>(n_ctx) : 4096;
+                cparams.n_batch         = n_batch > 0 ? static_cast<uint32_t>(n_batch) : 512;
+                cparams.n_ubatch        = cparams.n_batch;
+                cparams.n_threads       = n_threads;
+                cparams.n_threads_batch = n_threads;
+
+                engine->ctx = llama_init_from_model(engine->model, cparams);
+                if (engine->ctx == nullptr) {
+                    throw std::runtime_error("failed to create llama context");
+                }
+                engine->gpu_layers = layers;
+                loaded = true;
+                break;
+            } catch (const std::exception & e) {
+                last_error = e.what();
+            } catch (...) {
+                last_error = "unknown exception while initializing model/backend";
+            }
+
+            if (engine->ctx != nullptr) {
+                llama_free(engine->ctx);
+                engine->ctx = nullptr;
+            }
+            if (engine->model != nullptr) {
+                llama_model_free(engine->model);
+                engine->model = nullptr;
+            }
+            engine->vocab = nullptr;
+            if (layers > 0) {
+                LOGE("Vulkan model/context initialization failed (%s); retrying CPU/KleidiAI",
+                     last_error.c_str());
+            }
         }
-        return reinterpret_cast<jlong>(engine);
+
+        if (progress_ref != nullptr) env->DeleteGlobalRef(progress_ref);
+        pst.reset();
+
+        if (!loaded) {
+            throw std::runtime_error("failed to load model " + path + ": " + last_error);
+        }
+        return reinterpret_cast<jlong>(engine.release());
     } catch (const std::exception & e) {
         throwIllegalState(env, e.what());
         return 0;
@@ -386,6 +516,12 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeModelDesc(JNIEnv * env, jclass, jl
     char buf[256];
     llama_model_desc(e->model, buf, sizeof(buf));
     return utf8ToJString(env, std::string(buf));
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_littlebit_chat_engine_LlamaJni_nativeModelGpuLayers(JNIEnv *, jclass, jlong handle) {
+    auto * e = reinterpret_cast<NativeEngine *>(handle);
+    return e != nullptr ? e->gpu_layers : 0;
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -482,6 +618,10 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
 
     try {
         e->stop.store(false);
+        if (!e->pending_utf8.empty() && !flushUtf8Tail(env, cb, e->pending_utf8)) {
+            env->DeleteGlobalRef(cb);
+            return -1;
+        }
         const std::string prompt = toStdString(env, jprompt);
         const int n_ctx   = static_cast<int>(llama_n_ctx(e->ctx));
         const int n_batch = static_cast<int>(llama_n_batch(e->ctx));

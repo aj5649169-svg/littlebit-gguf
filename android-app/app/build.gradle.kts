@@ -26,7 +26,30 @@ android {
                 arguments += listOf(
                     "-DANDROID_STL=c++_shared",
                     "-DCMAKE_BUILD_TYPE=Release",
+                    "-DGGML_VULKAN=ON",
                 )
+                val vulkanSdk = System.getenv("VULKAN_SDK")
+                val glslc = System.getenv("VULKAN_GLSLC_EXECUTABLE")
+                    ?: vulkanSdk?.let { "$it/bin/glslc" }
+                val ndkRoot = System.getenv("ANDROID_NDK_HOME")
+                    ?: System.getenv("ANDROID_NDK_ROOT")
+                val ndkHost = when {
+                    System.getProperty("os.name").lowercase().contains("win") -> "windows-x86_64"
+                    System.getProperty("os.name").lowercase().contains("mac") -> "darwin-x86_64"
+                    else -> "linux-x86_64"
+                }
+                val ndkSysroot = ndkRoot?.let {
+                    "$it/toolchains/llvm/prebuilt/$ndkHost/sysroot"
+                }
+                if (vulkanSdk != null) {
+                    arguments += "-DVulkan_INCLUDE_DIR=$vulkanSdk/include"
+                }
+                if (glslc != null) {
+                    arguments += "-DVulkan_GLSLC_EXECUTABLE=$glslc"
+                }
+                if (ndkSysroot != null) {
+                    arguments += "-DVulkan_LIBRARY=$ndkSysroot/usr/lib/aarch64-linux-android/28/libvulkan.so"
+                }
             }
         }
     }
