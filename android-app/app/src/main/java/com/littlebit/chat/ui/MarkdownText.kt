@@ -84,7 +84,8 @@ private fun parseMarkdown(text: String): List<MdBlock> {
             continue
         }
         if (inMath) {
-            val close = line.indexOf("$")
+            val mathDelimiter = 36.toChar().toString().repeat(2)
+            val close = line.indexOf(mathDelimiter)
             if (close >= 0) {
                 if (close > 0) math.append(line.substring(0, close))
                 blocks.add(MdBlock.Math(math.toString().trim()))
@@ -99,11 +100,12 @@ private fun parseMarkdown(text: String): List<MdBlock> {
             continue
         }
         val trimmed = line.trim()
-        if (trimmed.startsWith("$")) {
+        val mathDelimiter = 36.toChar().toString().repeat(2)
+        if (trimmed.startsWith(mathDelimiter)) {
             flushParagraph()
             flushBullets()
-            val expression = trimmed.removePrefix("$")
-            val close = expression.indexOf("$")
+            val expression = trimmed.removePrefix(mathDelimiter)
+            val close = expression.indexOf(mathDelimiter)
             if (close >= 0) {
                 blocks.add(MdBlock.Math(expression.substring(0, close).trim()))
                 val trailing = expression.substring(close + 2).trim()
@@ -138,11 +140,23 @@ private fun parseMarkdown(text: String): List<MdBlock> {
 
 private fun inlineMarkdown(text: String, baseColor: Color, codeBg: Color): AnnotatedString =
     buildAnnotatedString {
+        val mathMarker = 36.toChar().toString()
+        val codeMarker = 96.toChar().toString()
         var i = 0
         while (i < text.length) {
             when {
-                text.startsWith("$", i) -> {
-                    val end = text.indexOf('
+                text.startsWith(mathMarker, i) -> {
+                    val end = text.indexOf(mathMarker, i + 1)
+                    if (end > i + 1) {
+                        withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) {
+                            append(formatLatex(text.substring(i + 1, end)))
+                        }
+                        i = end + 1
+                    } else {
+                        append(text[i]); i++
+                    }
+                }
+                text.startsWith("**", i) -> {
                     val end = text.indexOf("**", i + 2)
                     if (end > i + 2) {
                         withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
@@ -164,8 +178,8 @@ private fun inlineMarkdown(text: String, baseColor: Color, codeBg: Color): Annot
                         append(text[i]); i++
                     }
                 }
-                text.startsWith("`", i) -> {
-                    val end = text.indexOf('`', i + 1)
+                text.startsWith(codeMarker, i) -> {
+                    val end = text.indexOf(codeMarker, i + 1)
                     if (end > i) {
                         withStyle(
                             SpanStyle(
@@ -195,9 +209,10 @@ private fun inlineMarkdown(text: String, baseColor: Color, codeBg: Color): Annot
                 }
                 else -> {
                     val next = listOfNotNull(
+                        text.indexOf(mathMarker, i).takeIf { it >= 0 },
                         text.indexOf("**", i).takeIf { it >= 0 },
                         text.indexOf("__", i).takeIf { it >= 0 },
-                        text.indexOf('`', i).takeIf { it >= 0 },
+                        text.indexOf(codeMarker, i).takeIf { it >= 0 },
                         text.indexOf('*', i).takeIf { it >= 0 },
                         text.indexOf('_', i).takeIf { it >= 0 },
                     ).minOrNull() ?: text.length
@@ -271,7 +286,7 @@ private fun formatLatex(source: String): String {
         "\\right" to "",
     )
     replacements.forEach { (latex, unicode) -> value = value.replace(latex, unicode) }
-    return value.replace("$", "").replace("$", "").trim()
+    return value.replace(36.toChar().toString(), "").trim()
 }
 
 @Composable
