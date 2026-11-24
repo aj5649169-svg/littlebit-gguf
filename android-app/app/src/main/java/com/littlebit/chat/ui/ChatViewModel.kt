@@ -19,6 +19,7 @@ import com.littlebit.chat.engine.LlamaEngine
 import com.littlebit.chat.engine.ThinkBlocks
 import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -48,6 +49,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var loadStatus by mutableStateOf<String?>(null)
         private set
+    var localModels by mutableStateOf<List<File>>(emptyList())
+        private set
+    var loadError by mutableStateOf<String?>(null)
+        private set
+    var isCopyingModel by mutableStateOf(false)
+        private set
+    var copyTotalBytes by mutableStateOf(-1L)
+        private set
+    var modelLoadSuccessVersion by mutableIntStateOf(0)
+        private set
+    private var activeModelPath: String? = null
 
     val isLoaded: Boolean get() = engine.isLoaded
 
@@ -104,6 +116,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         store.load()
         val restored = store.sessions.firstOrNull()
         if (restored != null) activate(restored) else createChat()
+        refreshLocalModels()
     }
 
     // ------------------------------------------------------------- chat flows
@@ -149,45 +162,135 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ------------------------------------------------------------ model flows
+    fun refreshLocalModels() {
+        viewModelScope.launch(Dispatchers.IO) {
+            localModels = ModelFiles.listLocalModels(getApplication())
+        }
+    }
+
+    fun dismissLoadError() {
+        loadError = null
+    }
+
     fun loadModelFromUri(uri: Uri) {
         if (loadProgress >= 0f) return
         viewModelScope.launch(Dispatchers.IO) {
-            loadStatus = "Copying model into app storage…"
+            loadError = null
+            loadStatus = "Copying selected .gguf into app storage…"
             loadProgress = 0f
+            isCopyingModel = true
+            copyTotalBytes = -1L
             try {
-                val dest = ModelFiles.copyModelToAppStorage(getApplication(), uri)
-                loadFromFile(dest)
+                val destination = ModelFiles.copyModelToAppStorage(getApplication(), uri) {
+                    copiedBytes, totalBytes ->
+                    copyTotalBytes = totalBytes
+                    loadProgress = if (totalBytes > 0L) {
+                        0.35f * (copiedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
+                    } else {
+                        0f
+                    }
+                }
+                isCopyingModel = false
+                localModels = ModelFiles.listLocalModels(getApplication())
+                loadFromFile(destination)
             } catch (t: Throwable) {
-                loadStatus = "Load failed: ${t.message ?: t.javaClass.simpleName}"
+                if (t is CancellationException) throw t
+                loadStatus = null
+                loadError = "Model copy failed: ${t.message ?: t.javaClass.simpleName}"
+            } finally {
+                isCopyingModel = false
+                copyTotalBytes = -1L
+                loadProgress = -1f
+            }
+        }
+    }
+
+    fun loadLocalModel(file: File) {
+        if (loadProgress >= 0f) return
+        viewModelScope.launch(Dispatchers.IO) {
+            loadError = null
+            try {
+                loadFromFile(file)
             } finally {
                 loadProgress = -1f
             }
         }
     }
 
+    fun deleteLocalModel(file: File) {
+        if (loadProgress >= 0f) return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (activeModelPath == file.absolutePath) {
+                    cancelPrewarmSuspend()
+                    engineMutex.withLock {
+                        if (engine.isLoaded) engine.unload()
+                    }
+                    modelInfo = null
+                    modelName = null
+                    activeModelPath = null
+                }
+                if (!ModelFiles.deleteLocalModel(getApplication(), file)) {
+                    throw IllegalStateException("Could not delete ${file.name}.")
+                }
+                localModels = ModelFiles.listLocalModels(getApplication())
+                loadError = null
+                loadStatus = "Deleted ${file.name}."
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                loadError = "Delete failed: ${t.message ?: t.javaClass.simpleName}"
+            }
+        }
+    }
+
     private suspend fun loadFromFile(file: File) {
-        cancelPrewarmSuspend()
-        engineMutex.withLock { if (engine.isLoaded) engine.unload() }
-        modelInfo = null
-        modelName = null
+        loadError = null
         loadStatus = "Loading ${file.name}…"
+        loadProgress = 0.35f
         try {
+            require(file.isFile && file.length() > 0L) {
+                "The selected model file is missing or empty."
+            }
+            require(file.extension.equals("gguf", ignoreCase = true)) {
+                "Only .gguf model files can be loaded."
+            }
+
+            cancelPrewarmSuspend()
+            engineMutex.withLock {
+                if (engine.isLoaded) engine.unload()
+            }
+            modelInfo = null
+            modelName = null
+            activeModelPath = null
+
             val info = engineMutex.withLock {
-                // Vulkan GPU offload arrives in v0.2; nGpuLayers stays 0 on CPU.
-                val gpuLayers = if (settings.vulkanOffload) 32 else 0
+                // CPU-only model loading: GPU offload remains disabled.
                 engine.loadModel(
                     path = file.absolutePath,
                     contextSize = settings.contextSize,
                     threads = settings.threads,
-                    nGpuLayers = gpuLayers,
-                    onProgress = { p -> loadProgress = p },
+                    nGpuLayers = 0,
+                    onProgress = { progress ->
+                        loadProgress = 0.35f + (progress.coerceIn(0f, 1f) * 0.65f)
+                    },
                 )
             }
             modelInfo = info
             modelName = file.name
+            activeModelPath = file.absolutePath
+            loadProgress = 1f
             loadStatus = null
+            loadError = null
+            modelLoadSuccessVersion += 1
         } catch (t: Throwable) {
-            loadStatus = "Load failed: ${t.message ?: t.javaClass.simpleName}"
+            if (t is CancellationException) throw t
+            if (!engine.isLoaded) {
+                modelInfo = null
+                modelName = null
+                activeModelPath = null
+            }
+            loadStatus = null
+            loadError = "Model load failed for ${file.name}: ${t.message ?: t.javaClass.simpleName}"
         }
     }
 
@@ -197,6 +300,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             engineMutex.withLock { engine.unload() }
             modelInfo = null
             modelName = null
+            activeModelPath = null
             loadStatus = "Model unloaded — RAM freed."
         }
     }

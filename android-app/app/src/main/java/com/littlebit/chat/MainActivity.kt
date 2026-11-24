@@ -35,6 +35,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -82,6 +83,13 @@ private fun RootScaffold(vm: ChatViewModel = viewModel()) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     var screen by remember { mutableStateOf(AppScreen.CHAT) }
+
+    // A successful native model load always returns the user to the shared Chat screen.
+    LaunchedEffect(vm.modelLoadSuccessVersion) {
+        if (vm.modelLoadSuccessVersion > 0) {
+            screen = AppScreen.CHAT
+        }
+    }
 
     val closeDrawer: () -> Unit = { scope.launch { drawerState.close() } }
 

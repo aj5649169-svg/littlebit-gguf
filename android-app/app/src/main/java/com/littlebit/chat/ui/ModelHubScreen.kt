@@ -14,13 +14,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -41,6 +44,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextOverflow
+import java.io.File
 import com.littlebit.chat.data.ModelEntry
 import com.littlebit.chat.data.ModelsCatalog
 import kotlinx.coroutines.Dispatchers
@@ -64,6 +69,7 @@ fun ModelHubScreen(vm: ChatViewModel, onBack: () -> Unit) {
 
     LaunchedEffect(Unit) {
         models = withContext(Dispatchers.IO) { ModelsCatalog.load(context) }
+        vm.refreshLocalModels()
     }
 
     val pickModel = rememberLauncherForActivityResult(
@@ -106,6 +112,31 @@ fun ModelHubScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 .padding(horizontal = 14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            item(key = "my-local-header") {
+                Column {
+                    Text("My Local Models", style = MaterialTheme.typography.titleMedium)
+                    if (vm.localModels.isEmpty()) {
+                        Text(
+                            "Imported .gguf files will stay here until you delete them.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                }
+            }
+            items(
+                items = vm.localModels,
+                key = { it.absolutePath },
+            ) { file ->
+                LocalModelCard(
+                    file = file,
+                    enabled = vm.loadProgress < 0f,
+                    onLoad = { vm.loadLocalModel(file) },
+                    onDelete = { vm.deleteLocalModel(file) },
+                )
+            }
+
             item(key = "local") {
                 Column {
                     Button(
@@ -132,13 +163,50 @@ fun ModelHubScreen(vm: ChatViewModel, onBack: () -> Unit) {
                             modifier = Modifier.padding(top = 6.dp),
                         )
                     }
-                    if (vm.loadProgress in 0f..1f) {
-                        LinearProgressIndicator(
-                            progress = { vm.loadProgress.coerceIn(0f, 1f) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(top = 8.dp),
-                        )
+                    if (vm.loadProgress >= 0f) {
+                        if (vm.isCopyingModel && vm.copyTotalBytes <= 0L) {
+                            LinearProgressIndicator(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 8.dp),
+                            )
+                        } else {
+                            LinearProgressIndicator(
+                                progress = { vm.loadProgress.coerceIn(0f, 1f) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 8.dp),
+                            )
+                        }
+                    }
+                }
+            }
+
+            vm.loadError?.let { error ->
+                item(key = "load-error") {
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                        ),
+                    ) {
+                        Column(Modifier.padding(12.dp)) {
+                            Text(
+                                "Model error",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                            )
+                            Text(
+                                error,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.padding(top = 4.dp),
+                            )
+                            TextButton(
+                                onClick = vm::dismissLoadError,
+                                modifier = Modifier.align(Alignment.End),
+                            ) { Text("Dismiss") }
+                        }
                     }
                 }
             }
@@ -214,6 +282,45 @@ fun ModelHubScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 TextButton(onClick = { confirmHeavy = null }) { Text("Cancel") }
             },
         )
+    }
+}
+
+@Composable
+private fun LocalModelCard(
+    file: File,
+    enabled: Boolean,
+    onLoad: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Card(shape = RoundedCornerShape(16.dp)) {
+        Column(Modifier.padding(14.dp)) {
+            Text(
+                file.name,
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                "%.2f GB".format(file.length() / 1e9),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 3.dp),
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onLoad, enabled = enabled) { Text("Load") }
+                TextButton(onClick = onDelete, enabled = enabled) {
+                    Icon(Icons.Default.Delete, contentDescription = null)
+                    Spacer(Modifier.padding(2.dp))
+                    Text("Delete")
+                }
+            }
+        }
     }
 }
 
