@@ -730,6 +730,11 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeContinueGenerate(
         return -1;
     }
     jobject cb = env->NewGlobalRef(jcallback);
+    if (cb == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        throwIllegalState(env, "could not retain generation callback");
+        return -1;
+    }
 
     // Continue sampling from the current KV state (speculative pre-warm flush):
     // no prompt re-processing, logits of the last decoded token are reused.

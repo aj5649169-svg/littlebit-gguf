@@ -3,7 +3,7 @@
 #
 # CMake flags mirror scripts/build-android.sh exactly:
 #   -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 (from Gradle)
-#   -DGGML_NATIVE=OFF -DGGML_CPU_KLEIDIAI=ON -DGGML_OPENMP=OFF
+#   -DGGML_NATIVE=OFF -DGGML_CPU_KLEIDIAI=ON -DGGML_OPENMP=OFF -DGGML_VULKAN=ON
 
 cmake_minimum_required(VERSION 3.22)
 project(littlebit-jni LANGUAGES CXX)
@@ -81,12 +81,16 @@ if(ANDROID)
         message(FATAL_ERROR "Modern host glslc missing: set VULKAN_GLSLC_EXECUTABLE to SDK glslc.")
     endif()
 
-    find_library(ANDROID_VULKAN_LIBRARY NAMES vulkan
-        PATHS
-            "${CMAKE_SYSROOT}/usr/lib/aarch64-linux-android/${CMAKE_SYSTEM_VERSION}"
-            "${CMAKE_SYSROOT}/usr/lib/aarch64-linux-android"
-        NO_DEFAULT_PATH)
-    if(NOT ANDROID_VULKAN_LIBRARY)
+    if(Vulkan_LIBRARY AND EXISTS "${Vulkan_LIBRARY}")
+        set(ANDROID_VULKAN_LIBRARY "${Vulkan_LIBRARY}")
+    else()
+        find_library(ANDROID_VULKAN_LIBRARY NAMES vulkan
+            PATHS
+                "${CMAKE_SYSROOT}/usr/lib/aarch64-linux-android/${CMAKE_SYSTEM_VERSION}"
+                "${CMAKE_SYSROOT}/usr/lib/aarch64-linux-android"
+            NO_DEFAULT_PATH)
+    endif()
+    if(NOT ANDROID_VULKAN_LIBRARY OR NOT EXISTS "${ANDROID_VULKAN_LIBRARY}")
         message(FATAL_ERROR "Android NDK libvulkan.so missing for arm64-v8a / android-28.")
     endif()
     set(Vulkan_LIBRARY "${ANDROID_VULKAN_LIBRARY}" CACHE FILEPATH "Android Vulkan loader" FORCE)
