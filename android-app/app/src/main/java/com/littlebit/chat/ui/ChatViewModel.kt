@@ -75,7 +75,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var fastMode by mutableStateOf(settings.fastMode)
         private set
 
-    fun setFastMode(enabled: Boolean) {
+    fun updateFastMode(enabled: Boolean) {
         if (fastMode == enabled) return
         fastMode = enabled
         settings.fastMode = enabled
@@ -86,7 +86,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var instantReply by mutableStateOf(settings.instantReply)
         private set
 
-    fun setInstantReply(enabled: Boolean) {
+    fun updateInstantReply(enabled: Boolean) {
         if (instantReply == enabled) return
         instantReply = enabled
         settings.instantReply = enabled

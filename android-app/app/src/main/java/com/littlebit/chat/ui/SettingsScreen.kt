@@ -180,7 +180,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                     title = "Instant Reply (Background Pre-Warm)",
                     subtitle = "Drafts your reply while you type — shows a “Pre-warming…” dot in the chat bar.",
                     checked = vm.instantReply,
-                    onCheckedChange = vm::setInstantReply,
+                    onCheckedChange = vm::updateInstantReply,
                 )
             }
             item(key = "fastmode") {
@@ -188,7 +188,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                     title = "Fast Mode by default",
                     subtitle = "Skip the reasoning chain (/no_think) — faster answers, less heat.",
                     checked = vm.fastMode,
-                    onCheckedChange = vm::setFastMode,
+                    onCheckedChange = vm::updateFastMode,
                 )
             }
             item(key = "vulkan") {
