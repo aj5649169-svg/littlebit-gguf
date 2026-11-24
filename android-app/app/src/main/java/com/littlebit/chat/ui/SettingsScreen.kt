@@ -81,6 +81,8 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
     var repeatPenalty by remember { mutableFloatStateOf(settings.repeatPenalty.toFloat()) }
     var dry by remember { mutableFloatStateOf(settings.dryMultiplier.toFloat()) }
     var systemPrompt by remember { mutableStateOf(settings.systemPrompt) }
+    var vulkanEnabled by remember { mutableStateOf(settings.vulkanOffload) }
+    var gpuLayers by remember { mutableFloatStateOf(settings.vulkanGpuLayers.toFloat()) }
 
     Scaffold(
         topBar = {
@@ -222,12 +224,38 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
             }
             item(key = "vulkan") {
                 SwitchRow(
-                    title = "Vulkan GPU Offload (Coming in v0.2)",
-                    subtitle = "nGpuLayers is already plumbed through the engine — one CMake flag away.",
-                    checked = false,
-                    enabled = false,
-                    onCheckedChange = { },
+                    title = "Vulkan GPU Offload",
+                    subtitle = "Experimental GPU inference. Off by default; CPU uses KleidiAI.",
+                    checked = vulkanEnabled,
+                    onCheckedChange = {
+                        vulkanEnabled = it
+                        settings.vulkanOffload = it
+                    },
                 )
+            }
+            if (vulkanEnabled) {
+                item(key = "vulkan-layers") {
+                    Column {
+                        SliderRow(
+                            label = "GPU Layers (n_gpu_layers)",
+                            value = gpuLayers,
+                            range = 0f..99f,
+                            steps = 98,
+                            display = gpuLayers.roundToInt().toString(),
+                            onChange = { gpuLayers = it },
+                            onChangeFinished = {
+                                settings.vulkanGpuLayers = gpuLayers.roundToInt()
+                                gpuLayers = settings.vulkanGpuLayers.toFloat()
+                            },
+                        )
+                        Text(
+                            "Reload model after changing GPU offload. On Mali GPUs, compare t/s against CPU KleidiAI.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 2.dp),
+                        )
+                    }
+                }
             }
             item(key = "footer") { Spacer(Modifier.height(16.dp)) }
         }

@@ -19,6 +19,7 @@ class LlamaEngine {
         val description: String,
         val sizeBytes: Long,
         val fileType: String,
+        val gpuLayers: Int = 0,
     )
 
     data class SamplingParams(
@@ -88,6 +89,7 @@ class LlamaEngine {
             description = LlamaJni.nativeModelDesc(h),
             sizeBytes = LlamaJni.nativeModelSizeBytes(h),
             fileType = LlamaJni.nativeModelFtype(h),
+            gpuLayers = LlamaJni.nativeModelGpuLayers(h),
         )
     }
 

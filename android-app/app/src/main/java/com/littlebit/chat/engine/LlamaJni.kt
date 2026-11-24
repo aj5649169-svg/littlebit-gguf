@@ -23,6 +23,7 @@ internal object LlamaJni {
     ): Long
 
     external fun nativeModelDesc(handle: Long): String
+    external fun nativeModelGpuLayers(handle: Long): Int
     external fun nativeModelSizeBytes(handle: Long): Long
     external fun nativeModelFtype(handle: Long): String
 

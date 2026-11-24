@@ -76,6 +76,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun dismissChatError() { chatError = null }
 
     val isLoaded: Boolean get() = engine.isLoaded
+    val isUsingVulkan: Boolean get() = (modelInfo?.gpuLayers ?: 0) > 0
+    val activeBackendLabel: String
+        get() = if (isUsingVulkan) "GPU · Vulkan" else "CPU · KleidiAI"
 
     // ------------------------------------------------------------------- chat
     val sessions: List<ChatSession> get() = store.sessions
@@ -298,7 +301,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     path = file.absolutePath,
                     contextSize = settings.contextSize,
                     threads = settings.threads,
-                    nGpuLayers = 0,
+                    nGpuLayers = if (settings.vulkanOffload) settings.vulkanGpuLayers else 0,
                     onProgress = { progress ->
                         loadProgress = 0.35f + (progress.coerceIn(0f, 1f) * 0.65f)
                     },

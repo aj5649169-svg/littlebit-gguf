@@ -60,9 +60,13 @@ class SettingsStore(context: Context) {
         get() = prefs.getString("last_model_path", null)
         set(v) { prefs.edit().putString("last_model_path", v).apply() }
 
-    /** Vulkan GPU offload — effective in v0.2 once -DGGML_VULKAN=ON ships.
-     *  Plumbed end-to-end now (nGpuLayers), CPU-only until then. */
+    /** Vulkan is opt-in; KleidiAI remains the default backend. */
     var vulkanOffload: Boolean
         get() = prefs.getBoolean("vulkan_offload", false)
         set(v) { prefs.edit().putBoolean("vulkan_offload", v).apply() }
+
+    /** Requested GPU layers. 99 asks llama.cpp to offload all eligible layers. */
+    var vulkanGpuLayers: Int
+        get() = prefs.getInt("vulkan_gpu_layers", 99).coerceIn(0, 99)
+        set(v) { prefs.edit().putInt("vulkan_gpu_layers", v.coerceIn(0, 99)).apply() }
 }
