@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "notes": "Model catalog for LittleBit Chat. Edit freely: the app reads this file from assets. 'url' is opened in Chrome (ACTION_VIEW) so Android/Chrome handles the download — there is no in-app downloader.",
+  "notes": "Model catalog for LittleBit Chat. Edit freely: the app reads this file from assets. 'url' is opened in Chrome (ACTION_VIEW) so Android/Chrome handles the download — there is no in-app downloader. 'recommended' models (~2.5 GB) run ~2x faster and delay thermal throttling on phones.",
   "models": [
     {
       "id": "qwen3-0.6b-q4_k_m",
@@ -65,6 +65,7 @@
       "ramNote": "6–8 GB RAM",
       "quant": "Q4_K_M",
       "sizeGB": 2.55,
+      "recommended": true,
       "url": "https://huggingface.co/bartowski/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf?download=true",
       "tags": ["chat", "reasoning"]
     },
@@ -98,6 +99,7 @@
       "ramNote": "8–12 GB RAM",
       "quant": "IQ2_XS",
       "sizeGB": 2.7,
+      "recommended": true,
       "url": "https://huggingface.co/bartowski/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-IQ2_XS.gguf?download=true",
       "tags": ["chat", "reasoning", "low-ram"]
     },
