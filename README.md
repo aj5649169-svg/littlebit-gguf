@@ -1,5 +1,7 @@
 # littlebit-gguf
 
+https://github.com/aj5649169-svg/littlebit-chat
+
 Run **sub-1-bit LittleBit and LittleBit-2 language models in llama.cpp**, using the 1-bit `Q1_0` tensor type llama.cpp already ships instead of writing new kernels.
 
 > **This is a research project.** It is independent and experimental, and it is not affiliated with or endorsed by Samsung or the llama.cpp project. Expect breaking changes and rough edges.
