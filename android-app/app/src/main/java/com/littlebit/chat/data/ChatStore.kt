@@ -38,6 +38,7 @@ class ChatStore(private val file: File) {
                 val rows = o.optJSONArray("messages") ?: JSONArray()
                 for (j in 0 until rows.length()) {
                     val m = rows.getJSONObject(j)
+                    if (m.getString("role") == "assistant" && m.getString("content").isBlank()) continue
                     messages.add(ChatMessage(m.getString("role"), m.getString("content"), m.optBoolean("fast"), m.optBoolean("cutOff")))
                 }
                 sessions.add(ChatSession(

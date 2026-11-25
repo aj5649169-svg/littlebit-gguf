@@ -69,6 +69,8 @@ internal object LlamaJni {
     ): Int
 
     external fun nativeMetrics(handle: Long): DoubleArray
+    external fun nativeAttachDraft(handle: Long, draft: Long): Boolean
+    external fun nativeBenchmarkContext(handle: Long): Long
     external fun nativeReset(handle: Long)
     external fun nativePromptSize(handle: Long, prompt: String): Int
     external fun nativeStop(handle: Long)

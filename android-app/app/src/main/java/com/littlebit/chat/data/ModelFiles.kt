@@ -104,7 +104,7 @@ object ModelFiles {
      * Returns (display name, size). DISPLAY_NAME is the provider's real name;
      * URI path segments often contain opaque document IDs such as "28946".
      */
-    private fun queryDocumentMetadata(context: Context, uri: Uri): Pair<String?, Long> {
+    fun queryDocumentMetadata(context: Context, uri: Uri): Pair<String?, Long> {
         return runCatching {
             context.contentResolver.query(
                 uri,

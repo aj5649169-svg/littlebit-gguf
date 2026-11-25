@@ -53,6 +53,9 @@ struct NativeEngine {
     std::vector<llama_token> cached_tokens;
     std::chrono::steady_clock::time_point started;
     double ttft_ms = 0, prefill_rate = 0, decode_rate = 0;
+    llama_context_params params{};
+    NativeEngine * draft = nullptr; // Kotlin holds both handles under the same engine mutex.
+    bool owns_model = true;
     int                 gpu_layers = 0;
     // UTF-8 code points may span token-piece boundaries or a speculative
     // generate/continue boundary. Keep incomplete bytes here until complete.
@@ -321,6 +324,67 @@ llama_sampler * buildSampler(const llama_vocab * vocab, int n_vocab, const Sampl
 
 // Sampling loop shared by nativeGenerate and nativeContinueGenerate.
 // Returns 0 finished, 1 stopped/aborted, 2 context full, -1 error.
+// Batch positions are explicit because accepted target tokens can replace a proposed suffix.
+bool decodeTokens(NativeEngine * e, const llama_token * tokens, int count, int pos, bool all_logits) {
+    std::unique_ptr<llama_batch_ext, decltype(&llama_batch_ext_free)> batch(
+        llama_batch_ext_init(e->ctx), llama_batch_ext_free);
+    if (!batch) return false;
+    for (int i = 0; i < count; ++i) {
+        int idx = llama_batch_ext_add_token(batch.get(), 0, tokens[i]);
+        llama_pos at = pos + i;
+        if (idx < 0 || !llama_batch_ext_set_pos(batch.get(), idx, &at) ||
+            !llama_batch_ext_set_output_logits(batch.get(), idx, all_logits || i == count - 1)) return false;
+    }
+    return llama_process(e->ctx, LLAMA_PROCESS_TYPE_DECODE, batch.get()) == 0;
+}
+
+void clearHistory(NativeEngine * e) {
+    llama_memory_clear(llama_get_memory(e->ctx), false);
+    e->cached_tokens.clear();
+    e->n_past = 0;
+}
+
+bool draftGuesses(NativeEngine * target, llama_token confirmed, int limit,
+                  bool & synchronized, std::vector<llama_token> & batch) {
+    auto * d = target->draft;
+    int prefix = 0;
+    if (synchronized) {
+        // The previous block began with a confirmed target token. All positions
+        // before the next mismatch have already been accepted by the target.
+        prefix = std::min(d->n_past, target->n_past);
+    } else {
+        while (prefix < d->n_past && prefix < target->n_past &&
+               d->cached_tokens[prefix] == target->cached_tokens[prefix]) ++prefix;
+    }
+    if (prefix < d->n_past && !llama_memory_seq_rm(llama_get_memory(d->ctx), 0, prefix, -1)) {
+        clearHistory(d);
+        prefix = 0;
+    }
+    d->cached_tokens.resize(prefix);
+    d->n_past = prefix;
+    while (prefix < target->n_past && !target->stop.load()) {
+        int n = std::min(64, target->n_past - prefix);
+        auto start = target->cached_tokens.data() + prefix;
+        if (!decodeTokens(d, start, n, prefix, false)) return false;
+        d->cached_tokens.insert(d->cached_tokens.end(), start, start + n);
+        prefix += n;
+        d->n_past = prefix;
+    }
+    synchronized = true;
+    llama_token token = confirmed;
+    for (int i = 0; i < limit && !target->stop.load(); ++i) {
+        if (!decodeTokens(d, &token, 1, d->n_past, false)) return false;
+        d->cached_tokens.push_back(token);
+        ++d->n_past;
+        auto logits = llama_get_logits_ith(d->ctx, -1);
+        if (!logits) return false;
+        token = static_cast<llama_token>(std::max_element(logits, logits + llama_vocab_n_tokens(d->vocab)) - logits);
+        if (llama_vocab_is_eog(d->vocab, token)) break;
+        batch.push_back(token);
+    }
+    return true;
+}
+
 int runSamplingLoop(JNIEnv * env, NativeEngine * e, jobject cb,
                     llama_sampler * chain, jint max_tokens) {
     const int n_ctx   = static_cast<int>(llama_n_ctx(e->ctx));
@@ -332,6 +396,10 @@ int runSamplingLoop(JNIEnv * env, NativeEngine * e, jobject cb,
     bool reachedEog = false;
     std::vector<llama_token_data> candidates(static_cast<size_t>(n_vocab));
 
+    std::vector<llama_token> verified;
+    int next = 0;
+    int logits_index = -1;
+    bool draft_synced = false;
     while (!e->stop.load()) {
         if (n_gen >= max_tokens) break;
         if (e->n_past >= n_ctx - 1) {
@@ -340,7 +408,7 @@ int runSamplingLoop(JNIEnv * env, NativeEngine * e, jobject cb,
             break;
         }
 
-        float * logits = llama_get_logits_ith(e->ctx, -1);
+        float * logits = llama_get_logits_ith(e->ctx, logits_index);
         if (logits == nullptr) {
             callOnError(env, cb, "no logits available");
             status = -1;
@@ -369,27 +437,43 @@ int runSamplingLoop(JNIEnv * env, NativeEngine * e, jobject cb,
         }
         n_gen++;
 
-        llama_batch_ext * b = llama_batch_ext_init(e->ctx);
-        if (b == nullptr) { status = -1; callOnError(env, cb, "could not allocate decode batch"); break; }
-        const llama_pos pos = e->n_past;
-        const int idx = llama_batch_ext_add_token(b, 0, tok);
-        if (idx >= 0) {
-            llama_batch_ext_set_pos(b, idx, &pos);
-            llama_batch_ext_set_output_logits(b, idx, true);
-        }
-        const int rc = llama_process(e->ctx, LLAMA_PROCESS_TYPE_DECODE, b);
-        llama_batch_ext_free(b);
-        if (idx < 0 || rc != 0) {
-            llama_memory_clear(llama_get_memory(e->ctx), false);
-            e->cached_tokens.clear();
-            e->n_past = 0;
-            status = -1;
-            break;
+        if (next < static_cast<int>(verified.size()) && verified[next] == tok) {
+            logits_index = next++;
+        } else {
+            if (next < static_cast<int>(verified.size()) &&
+                !llama_memory_seq_rm(llama_get_memory(e->ctx), 0, e->n_past, -1)) {
+                clearHistory(e);
+                status = -1;
+                break;
+            }
+            verified.assign(1, tok);
+            const int limit = std::min({4, n_ctx - e->n_past - 2, max_tokens - n_gen});
+            if (e->draft && limit > 0 && !draftGuesses(e, tok, limit, draft_synced, verified)) {
+                clearHistory(e->draft);
+                e->draft = nullptr;
+                verified.resize(1);
+            }
+            if (!decodeTokens(e, verified.data(), static_cast<int>(verified.size()), e->n_past, true)) {
+                clearHistory(e);
+                status = -1;
+                break;
+            }
+            next = 1;
+            logits_index = 0;
         }
         e->cached_tokens.push_back(tok);
         e->n_past++;
     }
 
+    // ContinueGenerate expects the last logits row to describe the committed tail.
+    if (status >= 0 && next < static_cast<int>(verified.size()) && e->n_past > 0) {
+        int last = e->n_past - 1;
+        if (!llama_memory_seq_rm(llama_get_memory(e->ctx), 0, last, -1) ||
+            !decodeTokens(e, &e->cached_tokens[last], 1, last, false)) {
+            clearHistory(e);
+            status = -1;
+        }
+    }
     if (reachedEog && !flushUtf8Tail(env, cb, e->pending_utf8)) status = -1;
 
     const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -488,7 +572,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeLoadModel(
                 llama_context_params cparams = llama_context_default_params();
                 cparams.n_ctx           = n_ctx > 0 ? static_cast<uint32_t>(n_ctx) : 2048;
                 cparams.n_batch         = n_batch > 0 ? static_cast<uint32_t>(n_batch) : 512;
-                cparams.n_ubatch        = std::min(cparams.n_batch, 256u);
+                cparams.n_ubatch        = std::min(cparams.n_batch, layers > 0 ? 128u : 64u);
                 cparams.op_offload = layers > 0;
                 cparams.offload_kqv = layers > 0;
                 if (layers == 0) {
@@ -514,6 +598,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeLoadModel(
                 if (engine->ctx == nullptr) {
                     throw std::runtime_error("failed to create llama context");
                 }
+                engine->params = cparams;
                 engine->gpu_layers = layers;
                 loaded = true;
                 break;
@@ -670,7 +755,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
         const std::string prompt = toStdString(env, jprompt);
         const int n_ctx   = static_cast<int>(llama_n_ctx(e->ctx));
         const int logical_batch = static_cast<int>(llama_n_batch(e->ctx));
-        const int n_batch = e->gpu_layers > 0 ? logical_batch : std::min(64, logical_batch);
+        const int n_batch = std::min(e->gpu_layers > 0 ? 128 : 64, logical_batch);
         const int n_vocab = static_cast<int>(llama_vocab_n_tokens(e->vocab));
 
         // Tokenize the fully-templated prompt (special tokens parsed, BOS left to the template).
@@ -853,7 +938,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeUnload(JNIEnv *, jobject, jlong ha
     auto * e = reinterpret_cast<NativeEngine *>(handle);
     if (e == nullptr) return;
     if (e->ctx != nullptr) llama_free(e->ctx);
-    if (e->model != nullptr) llama_model_free(e->model);
+    if (e->owns_model && e->model != nullptr) llama_model_free(e->model);
     delete e;
 }
 
@@ -881,4 +966,49 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeMetrics(JNIEnv * env, jobject, jlo
     auto result = env->NewDoubleArray(5);
     if (result) env->SetDoubleArrayRegion(result, 0, 5, values);
     return result;
+}
+
+// The caller holds the parent engine mutex until this context is destroyed.
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_littlebit_chat_engine_LlamaJni_nativeBenchmarkContext(JNIEnv *env, jobject, jlong handle) {
+    auto * parent = reinterpret_cast<NativeEngine *>(handle);
+    try {
+        auto isolated = std::make_unique<NativeEngine>();
+        isolated->model = parent->model;
+        isolated->vocab = parent->vocab;
+        isolated->owns_model = false;
+        isolated->gpu_layers = parent->gpu_layers;
+        auto params = parent->params;
+        params.n_ctx = std::min(params.n_ctx, 512u);
+        if (params.abort_callback) params.abort_callback_data = isolated.get();
+        isolated->ctx = llama_init_from_model(parent->model, params);
+        if (!isolated->ctx) throw std::runtime_error("Insufficient memory for benchmark context");
+        return reinterpret_cast<jlong>(isolated.release());
+    } catch (const std::exception &error) {
+        throwIllegalState(env, error.what());
+        return 0;
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_littlebit_chat_engine_LlamaJni_nativeAttachDraft(JNIEnv *, jobject, jlong handle, jlong draft) {
+    auto * e = reinterpret_cast<NativeEngine *>(handle);
+    auto * d = reinterpret_cast<NativeEngine *>(draft);
+    e->draft = nullptr;
+    if (!d) return true;
+    for (auto * model : {e->model, d->model}) {
+        if (llama_model_is_recurrent(model) || llama_model_is_hybrid(model) || llama_model_n_swa(model)) return false;
+    }
+    if (llama_n_ctx(d->ctx) < llama_n_ctx(e->ctx) ||
+        llama_vocab_type(e->vocab) != llama_vocab_type(d->vocab) ||
+        llama_vocab_n_tokens(e->vocab) != llama_vocab_n_tokens(d->vocab) ||
+        llama_vocab_bos(e->vocab) != llama_vocab_bos(d->vocab) ||
+        llama_vocab_eos(e->vocab) != llama_vocab_eos(d->vocab)) return false;
+    for (int i = 0; i < llama_vocab_n_tokens(e->vocab); ++i) {
+        if (tokenToPiece(e->vocab, i) != tokenToPiece(d->vocab, i) ||
+            llama_vocab_get_attr(e->vocab, i) != llama_vocab_get_attr(d->vocab, i) ||
+            llama_vocab_is_eog(e->vocab, i) != llama_vocab_is_eog(d->vocab, i)) return false;
+    }
+    e->draft = d;
+    return true;
 }

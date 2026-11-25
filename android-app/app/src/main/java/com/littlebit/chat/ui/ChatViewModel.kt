@@ -100,10 +100,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     var isPrefilling by mutableStateOf(false)
         private set
     val lastModelName: String?
-        get() = settings.lastModelPath?.let { File(it).takeIf(File::exists)?.name }
+        get() = settings.lastModelPath?.let { if (it.startsWith("content://")) settings.lastDocumentName else File(it).takeIf(File::exists)?.name }
 
     fun reloadLastModel() {
         val path = settings.lastModelPath ?: return
+        if (path.startsWith("content://")) { loadModelFromUri(Uri.parse(path)); return }
         val file = File(path)
         if (file.isFile) loadLocalModel(file) else chatError = "Previously loaded model is missing: $path"
     }
@@ -252,20 +253,61 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var cancelLoad = false
     var canCancelLoad by mutableStateOf(false)
         private set
+    private fun foreground(stage: String, cancel: () -> Unit) =
+        com.littlebit.chat.InferenceForegroundService.begin(getApplication(), stage, cancel)
+    private fun finishForeground() =
+        com.littlebit.chat.InferenceForegroundService.finish(getApplication())
+
     fun cancelModelLoad() { cancelLoad = true; canCancelLoad = false; loadStatus = "Cancelling…" }
+
+    val linkedModels: List<Pair<String, String>> get() {
+        val docs = org.json.JSONObject(settings.linkedModelNames)
+        return docs.keys().asSequence().map { it to docs.getString(it) }.sortedBy { it.second.lowercase() }.toList()
+    }
+
+    fun forgetDocument(source: String) {
+        if (busy) return
+        val docs = org.json.JSONObject(settings.linkedModelNames)
+        docs.remove(source)
+        settings.linkedModelNames = docs.toString()
+        if (settings.lastModelPath == source) settings.lastModelPath = null
+        runCatching { getApplication<Application>().contentResolver.releasePersistableUriPermission(
+            Uri.parse(source), android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+    }
 
     fun loadModelFromUri(uri: Uri) {
         if (busy) return
         cancelLoad = false
+        foreground("Loading model…", ::cancelModelLoad)
         canCancelLoad = true
         loadProgress = 0f
         viewModelScope.launch(Dispatchers.IO) {
             loadError = null
-            loadStatus = "Copying selected .gguf into app storage…"
+            loadStatus = "Opening document…"
             loadProgress = 0f
             isCopyingModel = true
             copyTotalBytes = -1L
             try {
+                val app = getApplication<Application>()
+                val name = ModelFiles.queryDocumentMetadata(app, uri).first
+                isCopyingModel = false
+                if (name?.endsWith(".gguf", true) == true) {
+                    val descriptor = runCatching {
+                        app.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        app.contentResolver.openFileDescriptor(uri, "r")
+                    }.getOrNull()
+                    descriptor?.use {
+                        val linked = File("/proc/self/fd/${it.fd}")
+                        if (linked.isFile && linked.length() > 0) {
+                            loadFromFile(linked, name, uri.toString())
+                            if (loadError == null || cancelLoad) return@launch
+                        }
+                    }
+                }
+                if (cancelLoad) return@launch
+                loadError = null
+                isCopyingModel = true
+                loadStatus = "Importing a private copy…"
                 val destination = ModelFiles.copyModelToAppStorage(getApplication(), uri) {
                     copiedBytes, totalBytes ->
                     check(!cancelLoad) { "Import cancelled" }
@@ -286,6 +328,47 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 isCopyingModel = false
                 copyTotalBytes = -1L
+                finishForeground()
+                canCancelLoad = false
+                loadProgress = -1f
+            }
+        }
+    }
+
+    var draftName by mutableStateOf<String?>(null)
+        private set
+
+    fun selectDraft(uri: Uri?) {
+        if (busy || !isLoaded) return
+        cancelLoad = false
+        canCancelLoad = true
+        loadProgress = 0f
+        foreground("Configuring draft model…", ::cancelModelLoad)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                cancelPrewarmSuspend()
+                engineMutex.withLock {
+                    engine.clearDraft()
+                    draftName = null
+                    if (uri != null) {
+                        val app = getApplication<Application>()
+                        val name = ModelFiles.queryDocumentMetadata(app, uri).first ?: "Draft model"
+                        val descriptor = requireNotNull(app.contentResolver.openFileDescriptor(uri, "r"))
+                        descriptor.use {
+                            val file = File("/proc/self/fd/${it.fd}")
+                            require(file.isFile && file.length() > 0) { "Select a local, seekable draft model" }
+                            engine.attachDraft(file.path, settings.threads) { fraction ->
+                                check(!cancelLoad) { "Cancelled" }
+                                loadProgress = fraction
+                            }
+                        }
+                        if (cancelLoad) engine.clearDraft() else draftName = name
+                    }
+                }
+            } catch (e: Exception) {
+                if (!cancelLoad) loadError = "Draft disabled: ${e.message}. Main model remains available."
+            } finally {
+                finishForeground()
                 canCancelLoad = false
                 loadProgress = -1f
             }
@@ -295,6 +378,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun loadLocalModel(file: File) {
         if (busy) return
         cancelLoad = false
+        foreground("Loading model…", ::cancelModelLoad)
         canCancelLoad = true
         loadProgress = 0f
         viewModelScope.launch(Dispatchers.IO) {
@@ -302,6 +386,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 loadFromFile(file)
             } finally {
+                finishForeground()
                 canCancelLoad = false
                 loadProgress = -1f
             }
@@ -317,6 +402,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     cancelPrewarmSuspend()
                     engineMutex.withLock {
                         if (engine.isLoaded) engine.unload()
+                draftName = null
                     }
                     modelInfo = null
                     modelName = null
@@ -335,21 +421,22 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun loadFromFile(file: File) {
+    private suspend fun loadFromFile(file: File, name: String = file.name, source: String = file.absolutePath) {
         loadError = null
-        loadStatus = "Loading ${file.name}…"
+        loadStatus = "Loading $name…"
         loadProgress = 0.35f
         try {
             require(file.isFile && file.length() > 0L) {
                 "The selected model file is missing or empty."
             }
-            require(file.extension.equals("gguf", ignoreCase = true)) {
+            require(name.endsWith(".gguf", ignoreCase = true)) {
                 "Only .gguf model files can be loaded."
             }
 
             cancelPrewarmSuspend()
             engineMutex.withLock {
                 if (engine.isLoaded) engine.unload()
+                draftName = null
             }
             modelInfo = null
             modelName = null
@@ -377,12 +464,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 chatError = "Vulkan unavailable for this load. Using CPU · KleidiAI."
             }
             modelInfo = info
-            modelName = file.name
-            activeModelPath = file.absolutePath
+            modelName = name
+            activeModelPath = source
             loadProgress = 1f
             loadStatus = null
             loadError = null
-            settings.lastModelPath = file.absolutePath
+            if (source.startsWith("content://")) {
+                settings.linkedModelNames = org.json.JSONObject(settings.linkedModelNames).put(source, name).toString()
+            }
+            settings.lastDocumentName = name
+            settings.lastModelPath = source
             modelLoadSuccessVersion += 1
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
@@ -392,7 +483,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 activeModelPath = null
             }
             loadStatus = null
-            loadError = if (cancelLoad) null else "Model load failed for ${file.name}: ${t.message ?: t.javaClass.simpleName}"
+            loadError = if (cancelLoad) null else "Model load failed for $name: ${t.message ?: t.javaClass.simpleName}"
         }
     }
 
@@ -401,7 +492,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         cancelPrewarm()
         loadProgress = 0f
         viewModelScope.launch {
-            engineMutex.withLock { engine.unload() }
+            engineMutex.withLock { engine.unload(); draftName = null }
             loadProgress = -1f
             modelInfo = null
             modelName = null
@@ -439,6 +530,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         attachmentRequest++
         attachment = null
         stopRequested = false
+        foreground("Generating…", ::stopGeneration)
         isGenerating = true
         viewModelScope.launch(Dispatchers.Default) {
             var appended = false
@@ -501,6 +593,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val user = currentMessages.getOrNull(index - 1) ?: return
         if (!previous.cutOff || user.role != "user") return
         stopRequested = false
+        foreground("Generating…", ::stopGeneration)
         isGenerating = true
         viewModelScope.launch(Dispatchers.Default) {
             try {
@@ -513,6 +606,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
     private fun endTurn() {
+        finishForeground()
         rawStream = ""
         streamActive = false
         isPrefilling = false
@@ -635,34 +729,43 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (result.status < 0) chatError = result.error ?: "Generation failed"
         val message = ChatMessage("assistant", rawStream, cutOff = result.isStopped || result.isContextFull ||
             result.tokens >= settings.maxTokens)
-        if (replaceIndex == null) currentMessages.add(message) else currentMessages[replaceIndex] = message
+        if (rawStream.isNotBlank()) {
+            if (replaceIndex == null) currentMessages.add(message) else currentMessages[replaceIndex] = message
+        }
         syncActiveToStore()
     }
 
+    @Volatile private var activeBenchmark: LlamaEngine? = null
+
     fun benchmark() {
         if (busy || !isLoaded) return
+        stopRequested = false
+        foreground("Benchmarking…") { stopRequested = true; activeBenchmark?.stop() }
         benchmarking = true
         viewModelScope.launch(Dispatchers.Default) {
             try {
                 cancelPrewarmSuspend()
                 engineMutex.withLock {
-                    engine.reset()
-                    cacheSession = null
-                    val threads = settings.threads
-                    engine.setThreads(threads)
-                    val prompt = engine.formatChat(SettingsStore.DEFAULT_SYSTEM_PROMPT,
-                        listOf("user" to ThinkBlocks.withNoThink("Explain how rain forms, step by step.")))
-                    val result = engine.generate(prompt, LlamaEngine.SamplingParams(maxTokens = 96, seed = 42))
-                    check(result.status == 0) { result.error ?: "Benchmark interrupted" }
-                    val m = engine.metrics()
-                    val row = "%s · %s · %d threads · %d GPU layers\n%.1f p/s · %.1f t/s · %.0f ms TTFT (%d tokens)".format(
-                        modelName, activeBackendLabel, threads, modelInfo?.gpuLayers ?: 0, m[1], result.tokensPerSec, m[0], result.tokens)
-                    val old = org.json.JSONArray(settings.benchmarkHistory)
-                    val rows = org.json.JSONArray().put(row)
-                    for (i in 0 until minOf(4, old.length())) rows.put(old.getString(i))
-                    settings.benchmarkHistory = rows.toString()
+                    val bench = engine.benchmarkContext()
+                    activeBenchmark = bench
+                    try {
+                        val threads = settings.threads
+                        bench.setThreads(threads)
+                        val prompt = engine.formatChat(SettingsStore.DEFAULT_SYSTEM_PROMPT,
+                            listOf("user" to ThinkBlocks.withNoThink("Explain how rain forms, step by step.")))
+                        val result = bench.generate(prompt, LlamaEngine.SamplingParams(maxTokens = 96, seed = 42),
+                            prefill = { _, _ -> if (stopRequested) bench.stop() })
+                        check(result.status == 0) { result.error ?: "Benchmark interrupted" }
+                        val m = bench.metrics()
+                        val row = "%s · %s · %d threads · %d GPU layers\n%.1f p/s · %.1f t/s · %.0f ms TTFT (%d tokens)".format(
+                            modelName, activeBackendLabel, threads, modelInfo?.gpuLayers ?: 0, m[1], result.tokensPerSec, m[0], result.tokens)
+                        val old = org.json.JSONArray(settings.benchmarkHistory)
+                        val rows = org.json.JSONArray().put(row)
+                        for (i in 0 until minOf(4, old.length())) rows.put(old.getString(i))
+                        settings.benchmarkHistory = rows.toString()
+                    } finally { activeBenchmark = null; bench.unload() }
                 }
-            } catch (e: Exception) { chatError = e.message } finally { benchmarking = false }
+            } catch (e: Exception) { chatError = e.message } finally { finishForeground(); benchmarking = false }
         }
     }
 
@@ -732,8 +835,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        cancelLoad = true
+        stopRequested = true
+        activeBenchmark?.stop()
+        finishForeground()
         runCatching { engine.stop() }
-        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch { engineMutex.withLock { engine.unload() } }
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch { engineMutex.withLock { engine.unload(); draftName = null } }
         super.onCleared()
     }
 

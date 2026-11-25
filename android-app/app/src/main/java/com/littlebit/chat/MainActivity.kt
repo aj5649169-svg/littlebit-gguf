@@ -92,6 +92,13 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         installCrashLogHandler()
+        val permission = android.Manifest.permission.POST_NOTIFICATIONS
+        val prefs = getSharedPreferences("notifications", MODE_PRIVATE)
+        if (android.os.Build.VERSION.SDK_INT >= 33 && !prefs.getBoolean("asked", false) &&
+            checkSelfPermission(permission) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            prefs.edit().putBoolean("asked", true).apply()
+            requestPermissions(arrayOf(permission), 11)
+        }
         setContent {
             val vm: ChatViewModel = viewModel()
             LittleBitTheme(vm.settings) {
@@ -235,16 +242,32 @@ private fun DrawerContent(
         androidx.compose.material3.OutlinedTextField(query, { query = it }, singleLine = true,
             label = { Text("Search chats") }, modifier = Modifier.fillMaxWidth())
         LazyColumn(Modifier.weight(1f, fill = false)) {
-            items(
-                items = vm.sortedSessions.filter { s -> s.title.contains(query, true) || s.messages.any { it.content.contains(query, true) } },
-                key = { it.id },
-            ) { session ->
-                ChatHistoryRow(
-                    session = session,
-                    selected = session.id == vm.currentSession?.id,
-                    onOpen = { onOpenChat(session.id) },
-                    menu = { com.littlebit.chat.ui.HistoryMenu(vm, session) },
-                )
+            val today = java.time.LocalDate.now()
+            val zone = java.time.ZoneId.systemDefault()
+            val groups = vm.sortedSessions.filter { s ->
+                s.title.contains(query, true) || s.messages.any { it.content.contains(query, true) }
+            }.groupBy {
+                val date = java.time.Instant.ofEpochMilli(it.updatedAt).atZone(zone).toLocalDate()
+                when {
+                    it.pinned -> "Pinned"
+                    date >= today -> "Today"
+                    date >= today.minusDays(7) -> "Previous 7 days"
+                    else -> "Older"
+                }
+            }
+            for (label in listOf("Pinned", "Today", "Previous 7 days", "Older")) {
+                val chats = groups[label] ?: continue
+                item(key = "section-$label") {
+                    Text(label, Modifier.padding(start = 14.dp, top = 12.dp), style = MaterialTheme.typography.labelMedium)
+                }
+                items(items = chats, key = { it.id }) { session ->
+                    ChatHistoryRow(
+                        session = session,
+                        selected = session.id == vm.currentSession?.id,
+                        onOpen = { onOpenChat(session.id) },
+                        menu = { com.littlebit.chat.ui.HistoryMenu(vm, session) },
+                    )
+                }
             }
         }
 

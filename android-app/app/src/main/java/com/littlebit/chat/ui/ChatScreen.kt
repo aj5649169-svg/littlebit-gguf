@@ -35,6 +35,8 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -283,19 +285,23 @@ private fun MessageRow(
                         if (split.think != null) {
                             ThinkAccordion(split.think)
                         }
-                        MarkdownText(split.answer.ifBlank { "…" })
+                        if (split.answer.isNotBlank()) MarkdownText(split.answer)
                     }
                 }
-                if (showStats && isLast) {
-                    Telemetry(vm)
-                }
-                val clipboard = LocalClipboardManager.current
-                val buzz = hapticAction()
-                Row {
-                    IconButton(onClick = { buzz(); clipboard.setText(AnnotatedString(message.content)) }) {
-                        Icon(Icons.Default.ContentCopy, "Copy reply")
+                if (isLast && showStats) {
+                    val clipboard = LocalClipboardManager.current
+                    val buzz = hapticAction()
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { buzz(); clipboard.setText(AnnotatedString(message.content)) }) {
+                            Icon(Icons.Default.ContentCopy, "Copy reply", Modifier.size(18.dp))
+                        }
+                        IconButton(enabled = !vm.busy, onClick = { buzz(); vm.regenerate(vm.currentMessages.lastIndex) }) {
+                            Icon(Icons.Default.Refresh, "Regenerate reply", Modifier.size(20.dp))
+                        }
+                        IconButton(onClick = actions) { Icon(Icons.Default.MoreVert, "More message actions") }
+                        Spacer(Modifier.weight(1f))
+                        Telemetry(vm)
                     }
-                    TextButton(onClick = actions) { Text("Actions") }
                 }
             }
         }
@@ -571,22 +577,26 @@ private fun InputBar(vm: ChatViewModel) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Telemetry(vm: ChatViewModel) {
-    if (!vm.isLoaded || vm.used == 0) return
+    if (!vm.settings.showPerformance || !vm.isLoaded || vm.used == 0) return
     var details by remember { mutableStateOf(false) }
-    val ratio = (vm.used.toFloat() / vm.capacity.coerceAtLeast(1)).coerceIn(0f, 1f)
-    Column(Modifier.fillMaxWidth().padding(top = 6.dp)) {
-        TextButton(onClick = { details = !details }) {
-            Text(if (details) "Hide performance" else "%.1f t/s  ·  Performance".format(vm.lastTps))
+    val ratio = vm.used.toFloat() / vm.capacity.coerceAtLeast(1)
+    TextButton(onClick = { details = true }) {
+        Text("%.1f t/s".format(vm.lastTps), style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    if (details) ModalBottomSheet(onDismissRequest = { details = false }) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(vm.activeBackendLabel, style = MaterialTheme.typography.titleLarge)
+            Text("First token   %.0f ms".format(vm.ttft))
+            Text("Prompt   %.1f tokens/s".format(vm.prefill))
+            Text("Generation   %.1f tokens/s".format(vm.lastTps))
+            Text("Context   ${vm.used} / ${vm.capacity} tokens")
+            if (ratio >= .8f) TextButton(onClick = { details = false; vm.newChatFromMeter() }) { Text("New chat") }
+            Spacer(Modifier.height(16.dp))
         }
-        if (details) Text("%s · %.0f ms TTFT · %.1f p/s · %.1f t/s".format(vm.activeBackendLabel, vm.ttft, vm.prefill, vm.lastTps),
-            style = MaterialTheme.typography.labelSmall)
-        androidx.compose.material3.LinearProgressIndicator(progress = { ratio }, modifier = Modifier.fillMaxWidth(),
-            color = when { ratio >= .95f -> MaterialTheme.colorScheme.error
-                ratio >= .8f -> Color(0xFFFFB844)
-                else -> MaterialTheme.colorScheme.primary })
-        if (details || ratio >= .8f) Text("${vm.used} / ${vm.capacity} tokens", style = MaterialTheme.typography.labelSmall)
-        if (ratio >= .8f) TextButton(onClick = vm::newChatFromMeter) { Text("New chat") }
     }
 }

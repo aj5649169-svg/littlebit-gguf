@@ -100,6 +100,10 @@ class LlamaEngine {
     }
 
     fun metrics() = LlamaJni.nativeMetrics(handle)
+    fun benchmarkContext() = LlamaEngine().also {
+        it.handle = LlamaJni.nativeBenchmarkContext(handle)
+        check(it.isLoaded) { "Could not allocate a benchmark context" }
+    }
     fun reset() = LlamaJni.nativeReset(handle)
     fun promptSize(prompt: String) = LlamaJni.nativePromptSize(handle, prompt)
 
@@ -107,9 +111,30 @@ class LlamaEngine {
         if (handle != 0L) LlamaJni.nativeSetThreads(handle, threads)
     }
 
+    private var draft: LlamaEngine? = null
+
+    fun clearDraft() {
+        if (handle != 0L) LlamaJni.nativeAttachDraft(handle, 0)
+        draft?.unload()
+        draft = null
+    }
+
+    fun attachDraft(path: String, threads: Int, progress: ProgressCallback) {
+        clearDraft()
+        val candidate = LlamaEngine()
+        try {
+            candidate.loadModel(path, metrics()[3].toInt(), threads, 0, 128, false, progress)
+            check(LlamaJni.nativeAttachDraft(handle, candidate.handle)) { "Incompatible vocabulary or attention architecture" }
+            draft = candidate
+        } finally {
+            if (draft == null) candidate.unload()
+        }
+    }
+
     @Synchronized fun unload() {
         val h = handle
         if (h != 0L) {
+            clearDraft()
             LlamaJni.nativeUnload(h)
             handle = 0L
         }

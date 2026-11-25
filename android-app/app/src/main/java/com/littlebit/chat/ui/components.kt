@@ -75,7 +75,7 @@ fun ModelSelectorPill(
             Spacer(Modifier.width(8.dp))
             androidx.compose.foundation.layout.Column(Modifier.weight(1f, fill = false)) {
             Text(
-                text = modelName?.removeSuffix(".gguf") ?: "Select model",
+                text = modelName?.let(::modelTitle) ?: "Select model",
                 style = MaterialTheme.typography.titleSmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -136,4 +136,14 @@ private fun PillOption(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
         )
     }
+}
+
+internal fun modelTitle(filename: String): String {
+    val stem = filename.substringBeforeLast('.', filename)
+    val publisher = stem.substringBefore('_')
+    val core = if ('_' in stem && stem.substringAfter('_').startsWith(publisher, true))
+        stem.substringAfter('_') else stem
+    val quant = Regex("(?i)[-_]((?:I?Q[0-9][A-Z0-9_]*|F16|BF16|F32))$").find(core)
+    val family = core.substring(0, quant?.range?.first ?: core.length).replace(Regex("[-_]"), " ")
+    return listOfNotNull(family, quant?.groupValues?.get(1)).joinToString(" · ")
 }

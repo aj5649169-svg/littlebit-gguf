@@ -76,6 +76,10 @@ fun ModelHubScreen(vm: ChatViewModel, onBack: () -> Unit) {
         ActivityResultContracts.OpenDocument(),
     ) { uri -> uri?.let(vm::loadModelFromUri) }
 
+    val pickDraft = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) vm.selectDraft(uri)
+    }
+
     fun openInChrome(url: String) {
         runCatching {
             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
@@ -115,7 +119,7 @@ fun ModelHubScreen(vm: ChatViewModel, onBack: () -> Unit) {
             item(key = "my-local-header") {
                 Column {
                     Text("My Local Models", style = MaterialTheme.typography.titleMedium)
-                    if (vm.localModels.isEmpty()) {
+                    if (vm.localModels.isEmpty() && vm.linkedModels.isEmpty()) {
                         Text(
                             "Imported .gguf files will stay here until you delete them.",
                             style = MaterialTheme.typography.bodySmall,
@@ -137,6 +141,18 @@ fun ModelHubScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 )
             }
 
+            items(vm.linkedModels, key = { it.first }) { (uri, name) ->
+                Card {
+                    Column(Modifier.fillMaxWidth().padding(14.dp)) {
+                        Text(modelTitle(name), style = MaterialTheme.typography.titleMedium)
+                        Text("Linked document", style = MaterialTheme.typography.labelMedium)
+                        Row {
+                            TextButton(enabled = !vm.busy, onClick = { vm.loadModelFromUri(Uri.parse(uri)) }) { Text("Load") }
+                            TextButton(enabled = !vm.busy, onClick = { vm.forgetDocument(uri) }) { Text("Forget link") }
+                        }
+                    }
+                }
+            }
             item(key = "local") {
                 Column {
                     Button(
@@ -155,6 +171,14 @@ fun ModelHubScreen(vm: ChatViewModel, onBack: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 6.dp),
                     )
+                    if (vm.isLoaded) {
+                        TextButton(enabled = !vm.busy, onClick = { pickDraft.launch(arrayOf("*/*")) }) {
+                            Text(vm.draftName?.let { "Draft · ${modelTitle(it)}" } ?: "Pair a draft model")
+                        }
+                        if (vm.draftName != null) TextButton(enabled = !vm.busy, onClick = { vm.selectDraft(null) }) {
+                            Text("Disable draft")
+                        }
+                    }
                     vm.loadStatus?.let { status ->
                         Text(
                             status,
@@ -296,7 +320,7 @@ private fun LocalModelCard(
     Card(shape = RoundedCornerShape(16.dp)) {
         Column(Modifier.padding(14.dp)) {
             Text(
-                file.name,
+                modelTitle(file.name),
                 style = MaterialTheme.typography.titleSmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -333,7 +357,7 @@ private fun LoadedModelCard(vm: ChatViewModel) {
                 Column(Modifier.weight(1f)) {
                     Text("Loaded model", style = MaterialTheme.typography.labelMedium)
                     Text(
-                        vm.modelName ?: "",
+                        vm.modelName?.let(::modelTitle).orEmpty(),
                         style = MaterialTheme.typography.titleMedium,
                     )
                     vm.modelInfo?.let { info ->

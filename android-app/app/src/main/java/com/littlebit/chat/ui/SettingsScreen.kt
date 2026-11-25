@@ -58,6 +58,7 @@ private fun queryRam(context: Context): RamInfo {
 fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val settings = vm.settings
+    var advanced by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
     val crashFile = remember { File(context.filesDir, "last_crash.txt") }
     var crashLog by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
@@ -155,39 +156,6 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                     },
                 )
             }
-            item(key = "temp") {
-                SliderRow(
-                    label = "Temperature",
-                    value = temperature,
-                    range = 0f..2f,
-                    steps = 39,
-                    display = "%.2f".format(temperature),
-                    onChange = { temperature = it },
-                    onChangeFinished = { settings.temperature = temperature.toDouble() },
-                )
-            }
-            item(key = "rep") {
-                SliderRow(
-                    label = "Repeat Penalty",
-                    value = repeatPenalty,
-                    range = 1f..2f,
-                    steps = 49,
-                    display = "%.2f".format(repeatPenalty),
-                    onChange = { repeatPenalty = it },
-                    onChangeFinished = { settings.repeatPenalty = repeatPenalty.toDouble() },
-                )
-            }
-            item(key = "dry") {
-                SliderRow(
-                    label = "DRY Multiplier",
-                    value = dry,
-                    range = 0f..2f,
-                    steps = 39,
-                    display = "%.2f".format(dry),
-                    onChange = { dry = it },
-                    onChangeFinished = { settings.dryMultiplier = dry.toDouble() },
-                )
-            }
             item { Text("Appearance", style = MaterialTheme.typography.titleMedium) }
             item { Choices("Theme", listOf("System","Dark","Light","AMOLED Pure Black"), settings.theme) { settings.theme = it } }
             item { Choices("Accent", listOf("Emerald","Ocean Blue","Violet","Amber","Rose"), settings.accent) { settings.accent = it } }
@@ -196,12 +164,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 settings.font = it.substringAfter(' ').removeSuffix("sp").toInt()
             } }
             item { SwitchRow("Haptics", "Feedback on chat actions", settings.haptics) { settings.haptics = it } }
-            item { Choices("Prefill batch · reload model", listOf("256","512","1024"), settings.batch.toString()) { settings.batch = it.toInt() } }
-            item { SwitchRow("Vulkan Flash Attention", "Try Q8 KV cache on reload. CPU uses F16.", settings.flash) { settings.flash = it } }
-            item { Choices("Top K", listOf("0","20","40","80"), settings.topK.toString()) { settings.topK = it.toInt() } }
-            item { Choices("Top P (%)", listOf("80","90","95","100"), settings.topPercent.toString()) { settings.topPercent = it.toInt() } }
-            item { Choices("Min P (%)", listOf("0","5","10"), settings.minPercent.toString()) { settings.minPercent = it.toInt() } }
-            item { Choices("Output token limit", listOf("256","512","1024","2048","8192"), settings.maxTokens.toString()) { settings.maxTokens = it.toInt() } }
+            item { SwitchRow("Performance caption", "Tap the speed below a reply for details", settings.showPerformance) { settings.showPerformance = it } }
             item {
                 val presets = mapOf("Concise" to SettingsStore.DEFAULT_SYSTEM_PROMPT,
                     "Coder" to "Write correct code. Explain choices briefly.",
@@ -298,6 +261,52 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                         )
                     }
                 }
+            }
+            item {
+                TextButton(onClick = { advanced = !advanced }) {
+                    Text(if (advanced) "Advanced Sampling & Engine  ▴" else "Advanced Sampling & Engine  ▾")
+                }
+            }
+            if (advanced) {
+                item(key = "temp") {
+                    SliderRow(
+                        label = "Temperature",
+                        value = temperature,
+                        range = 0f..2f,
+                        steps = 39,
+                        display = "%.2f".format(temperature),
+                        onChange = { temperature = it },
+                        onChangeFinished = { settings.temperature = temperature.toDouble() },
+                    )
+                }
+                item(key = "rep") {
+                    SliderRow(
+                        label = "Repeat Penalty",
+                        value = repeatPenalty,
+                        range = 1f..2f,
+                        steps = 49,
+                        display = "%.2f".format(repeatPenalty),
+                        onChange = { repeatPenalty = it },
+                        onChangeFinished = { settings.repeatPenalty = repeatPenalty.toDouble() },
+                    )
+                }
+                item(key = "dry") {
+                    SliderRow(
+                        label = "DRY Multiplier",
+                        value = dry,
+                        range = 0f..2f,
+                        steps = 39,
+                        display = "%.2f".format(dry),
+                        onChange = { dry = it },
+                        onChangeFinished = { settings.dryMultiplier = dry.toDouble() },
+                    )
+                }
+                item { Choices("Prefill batch · reload model", listOf("256","512","1024"), settings.batch.toString()) { settings.batch = it.toInt() } }
+                item { SwitchRow("Vulkan Flash Attention", "Try Q8 KV cache on reload. CPU uses F16.", settings.flash) { settings.flash = it } }
+                item { Choices("Top K", listOf("0","20","40","80"), settings.topK.toString()) { settings.topK = it.toInt() } }
+                item { Choices("Top P (%)", listOf("80","90","95","100"), settings.topPercent.toString()) { settings.topPercent = it.toInt() } }
+                item { Choices("Min P (%)", listOf("0","5","10"), settings.minPercent.toString()) { settings.minPercent = it.toInt() } }
+                item { Choices("Output token limit", listOf("256","512","1024","2048","8192"), settings.maxTokens.toString()) { settings.maxTokens = it.toInt() } }
             }
             item(key = "footer") { Spacer(Modifier.height(16.dp)) }
         }

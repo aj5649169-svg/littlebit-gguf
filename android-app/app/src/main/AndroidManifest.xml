@@ -8,6 +8,10 @@
       which needs no permissions on API 28+.
     -->
 
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
@@ -16,6 +20,10 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.LittleBitChat">
 
+        <service android:name=".InferenceForegroundService" android:exported="false" android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-initiated offline GGUF model loading and text inference with a notification stop action" />
+        </service>
         <provider android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.exports" android:exported="false"
             android:grantUriPermissions="true">

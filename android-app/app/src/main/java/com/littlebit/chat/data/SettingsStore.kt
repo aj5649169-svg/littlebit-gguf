@@ -40,6 +40,9 @@ class SettingsStore(context: Context) {
     private fun label(key: String, default: String) =
         preference(key, default, { k, d -> prefs.getString(k, d) ?: d }) { e, k, v -> e.putString(k, v) }
 
+    var linkedModelNames by label("linked_model_names", "{}")
+    var lastDocumentName by label("last_document_name", "")
+    var showPerformance by flag("show_performance", true)
     var batch by number("prefill_batch", 512)
     var flash by flag("flash_attention", true)
     var topK by number("top_k", 40)
