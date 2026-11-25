@@ -7,7 +7,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.Crossfade
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.togetherWith
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.flow.collect
 import androidx.compose.foundation.background
@@ -37,6 +38,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -73,6 +75,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -88,11 +91,11 @@ import androidx.compose.ui.unit.sp
 import com.littlebit.chat.data.ChatMessage
 import com.littlebit.chat.engine.ThinkBlocks
 
-private val Suggestions = listOf(
-    "Explain how LLM quantization works, simply",
-    "Write a haiku about the ocean",
-    "Give me a 3-day Tokyo itinerary",
-    "Draft a polite deadline-extension email",
+private val Suggestions = mapOf(
+    "Summarize" to "Summarize the following text: ",
+    "Explain simply" to "Explain this in simple terms: ",
+    "Debug code" to "Help me debug this code: ",
+    "Write" to "Help me write ",
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -141,7 +144,7 @@ fun ChatScreen(
     Scaffold(
         floatingActionButton = {
             AnimatedVisibility(vm.streamActive && !autoScrollEnabled) {
-                androidx.compose.material3.SmallFloatingActionButton(onClick = {
+                androidx.compose.material3.SmallFloatingActionButton(shape = CircleShape, onClick = {
                     autoScrollEnabled = true
                     scrollScope.launch { listState.animateScrollToItem(totalItemCount - 1) }
                 }) { Icon(Icons.Default.KeyboardArrowDown, "Jump to bottom") }
@@ -153,7 +156,7 @@ fun ChatScreen(
                     ModelSelectorPill(
                         modelName = vm.modelName,
                         loaded = vm.isLoaded,
-                        status = when { vm.isPrefilling && vm.promptDecoded -> "Starting reply"; vm.isPrefilling -> "Reading history"; vm.streamActive -> "Writing"; vm.isLoaded -> vm.activeBackendLabel; else -> "Model Hub" },
+                        status = when { vm.isPrefilling && vm.promptDecoded -> "Starting reply"; vm.isPrefilling -> "Reading history"; vm.streamActive -> "Writing"; vm.isLoaded -> if (vm.isUsingVulkan) "Vulkan" else "CPU"; else -> "Model Hub" },
                         onClick = onOpenModelHub,
                     )
                 },
@@ -163,7 +166,7 @@ fun ChatScreen(
                     }
                 },
                 actions = {
-                    vm.currentSession?.let { HistoryMenu(vm, it) }
+                    IconButton(onClick = vm::newChatFromMeter) { Icon(Icons.Default.Add, "New chat") }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Default.Settings, contentDescription = "Settings")
                     }
@@ -238,7 +241,7 @@ fun ChatScreen(
                         EmptyState(
                             modelLoaded = vm.isLoaded,
                             onOpenModelHub = onOpenModelHub,
-                            onSuggestion = vm::sendText,
+                            onSuggestion = vm::onInputChange,
                             lastModelName = vm.lastModelName,
                             onReloadLastModel = vm::reloadLastModel,
                         )
@@ -269,9 +272,9 @@ private fun MessageRow(
                 text = message.content,
                 modifier = Modifier
                     .clip(RoundedCornerShape(18.dp))
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.9f))
+                    .background(MaterialTheme.colorScheme.primaryContainer)
                     .padding(horizontal = 14.dp, vertical = 10.dp),
-                color = MaterialTheme.colorScheme.onPrimary,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
                 fontSize = vm.settings.font.sp,
             )
         } else {
@@ -352,13 +355,9 @@ private fun ThinkAccordion(think: String) {
                     style = MaterialTheme.typography.titleSmall,
                     modifier = Modifier.weight(1f),
                 )
-                Text(
-                    if (expanded) "Hide" else "Show",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Icon(
-                    if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                val rotation by androidx.compose.animation.core.animateFloatAsState(
+                    if (expanded) 180f else 0f, androidx.compose.animation.core.tween(170), label = "Reasoning")
+                Icon(Icons.Default.KeyboardArrowDown, modifier = Modifier.rotate(rotation),
                     contentDescription = if (expanded) "Collapse" else "Expand",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -393,7 +392,7 @@ private fun EmptyState(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Text("LittleBit Chat", style = MaterialTheme.typography.headlineSmall)
+        Text("What’s on your mind?", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(8.dp))
         Text(
             text = if (modelLoaded) {
@@ -410,7 +409,7 @@ private fun EmptyState(
             if (lastModelName != null) {
                 Spacer(Modifier.height(8.dp))
                 Button(onClick = onReloadLastModel) {
-                    Text("↻ Reload $lastModelName", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("Reload ${modelTitle(lastModelName)}", maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
             Spacer(Modifier.height(20.dp))
@@ -418,13 +417,13 @@ private fun EmptyState(
         FlowRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            for (s in Suggestions) {
+            for ((s, prompt) in Suggestions) {
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant,
                     modifier = Modifier
                         .padding(vertical = 4.dp)
-                        .clickable(enabled = modelLoaded) { onSuggestion(s) },
+                        .clickable(enabled = modelLoaded) { onSuggestion(prompt) },
                 ) {
                     Text(
                         text = s,
@@ -463,7 +462,10 @@ private fun InputBar(vm: ChatViewModel) {
     ) {
         AnimatedVisibility(vm.attachment != null) {
             val file = vm.attachment ?: return@AnimatedVisibility
-            TextButton(onClick = vm::clearAttachment) { Text(file.name + if (file.truncated) " · first 12 KiB   ×" else "   ×") }
+            androidx.compose.material3.InputChip(selected = true, onClick = vm::clearAttachment,
+                modifier = Modifier.padding(horizontal = 14.dp),
+                label = { Text(file.name + if (file.truncated) " · first 12 KiB" else "", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                trailingIcon = { Icon(Icons.Default.Close, "Remove attachment") })
         }
         if (vm.preWarming) {
             Row(
@@ -485,7 +487,8 @@ private fun InputBar(vm: ChatViewModel) {
         }
         Surface(
             shape = RoundedCornerShape(22.dp),
-            color = MaterialTheme.colorScheme.surfaceContainer,
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
             modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
         ) {
             Column(Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) {
@@ -518,7 +521,7 @@ private fun InputBar(vm: ChatViewModel) {
                         color = MaterialTheme.colorScheme.surfaceVariant,
                     ) {
                         Text(
-                            if (vm.fastMode) "Fast reply" else "Think",
+                            if (vm.fastMode) "Fast" else "Think",
                             modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp),
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -540,7 +543,10 @@ private fun InputBar(vm: ChatViewModel) {
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.alpha(if (vm.isGenerating || canSend) 1f else 0.4f),
                     ) {
-                        Crossfade(vm.isGenerating, animationSpec = androidx.compose.animation.core.tween(120), label = "Send or stop") { generating ->
+                        AnimatedContent(vm.isGenerating, transitionSpec = {
+                            androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(160)) togetherWith
+                                androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(150))
+                        }, label = "Send or stop") { generating ->
                         Icon(
                             if (generating) Icons.Default.Stop else Icons.AutoMirrored.Filled.Send,
                             contentDescription = if (vm.isGenerating) "Stop generation" else "Send",
@@ -595,6 +601,7 @@ private fun Telemetry(vm: ChatViewModel) {
             Text("Prompt   %.1f tokens/s".format(vm.prefill))
             Text("Generation   %.1f tokens/s".format(vm.lastTps))
             Text("Context   ${vm.used} / ${vm.capacity} tokens")
+            androidx.compose.material3.LinearProgressIndicator(progress = { ratio.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
             if (ratio >= .8f) TextButton(onClick = { details = false; vm.newChatFromMeter() }) { Text("New chat") }
             Spacer(Modifier.height(16.dp))
         }

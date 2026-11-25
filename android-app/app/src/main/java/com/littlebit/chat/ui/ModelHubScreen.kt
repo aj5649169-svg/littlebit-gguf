@@ -326,7 +326,7 @@ private fun LocalModelCard(
     onLoad: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    Card(shape = RoundedCornerShape(16.dp)) {
+    Card(border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), shape = RoundedCornerShape(18.dp)) {
         Column(Modifier.padding(14.dp)) {
             Text(
                 modelTitle(file.name),
@@ -360,7 +360,7 @@ private fun LocalModelCard(
 
 @Composable
 private fun LoadedModelCard(vm: ChatViewModel) {
-    Card(shape = RoundedCornerShape(16.dp)) {
+    Card(border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), shape = RoundedCornerShape(18.dp)) {
         Column(Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -383,38 +383,33 @@ private fun LoadedModelCard(vm: ChatViewModel) {
     }
 }
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun ModelCard(entry: ModelEntry, onDownload: () -> Unit) {
-    Card(shape = RoundedCornerShape(16.dp)) {
+    Card(border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), shape = RoundedCornerShape(18.dp)) {
         Column(Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(entry.name, style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        "${entry.quant} · %.2f GB · %s".format(entry.sizeGB, entry.ramNote),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        for (label in listOf(entry.quant, "%.2f GB".format(entry.sizeGB), entry.ramNote))
+                            BadgeChip(label, MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
                 TextButton(onClick = onDownload) { Text("Download") }
             }
             if (entry.recommended) {
                 BadgeChip(
-                    text = "Fast & Cool (Recommended)",
-                    color = RecommendedColor,
+                    text = "Recommended",
+                    color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(top = 6.dp),
                 )
-                Text(
-                    "~2.5 GB models run ~2× faster and delay thermal throttling on phones.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 3.dp),
-                )
+
             }
             if (entry.ramWarning == "heavy") {
                 BadgeChip(
                     text = "12 GB+ RAM Required",
-                    color = HeavyRamColor,
+                    color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(top = 6.dp),
                 )
             }

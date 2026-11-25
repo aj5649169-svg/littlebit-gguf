@@ -65,7 +65,7 @@ fun PluginsScreen(vm: ChatViewModel, onBack: () -> Unit) {
         ) {
             for (plugin in PluginRegistry.plugins) {
                 item(key = plugin.id) {
-                    Card(shape = RoundedCornerShape(16.dp)) {
+                    Card(border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), shape = RoundedCornerShape(18.dp)) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
