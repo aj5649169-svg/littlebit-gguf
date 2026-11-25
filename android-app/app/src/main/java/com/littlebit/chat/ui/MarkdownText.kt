@@ -1,6 +1,7 @@
 package com.littlebit.chat.ui
 
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.border
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Box
@@ -323,7 +324,7 @@ fun MarkdownText(
     val parser = remember { StreamingMarkdown() }
     val blocks = remember(text) { parser.update(text.replace("\r\n", "\n")) }
     val codeBg = MaterialTheme.colorScheme.surfaceVariant
-    Column(modifier = modifier) {
+    Column(modifier = modifier, verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)) {
         for (block in blocks) {
             RenderBlock(block, color, codeBg)
         }
@@ -368,7 +369,7 @@ private fun RenderBlock(block: MdBlock, color: Color, codeBg: Color) {
                 is MdBlock.Table -> Column(Modifier.horizontalScroll(rememberScrollState())) {
                     for ((index, row) in block.rows.withIndex()) Row {
                         for (cell in row) Text(linked(cell, color, codeBg),
-                            Modifier.width(144.dp).padding(6.dp),
+                            Modifier.width(144.dp).background(if (index == 0) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer).border(1.dp, MaterialTheme.colorScheme.outlineVariant).padding(9.dp),
                             fontWeight = if (index == 0) FontWeight.Bold else FontWeight.Normal)
                     }
                 }
@@ -394,13 +395,15 @@ private fun formatLatex(source: String): String {
         "\\approx" to "≈",
         "\\pm" to "±",
         "\\infty" to "∞",
+        "\\mathbb{N}" to "ℕ", "\\mathbb{R}" to "ℝ",
+        "\\Rightarrow" to "⇒", "\\forall" to "∀", "\\exists" to "∃",
         "\\rightarrow" to "→",
         "\\to" to "→",
         "\\left" to "",
         "\\right" to "",
     )
     replacements.forEach { (latex, unicode) -> value = value.replace(latex, unicode) }
-    return value.replace(36.toChar().toString(), "").trim()
+    return Regex("""\\in(?![A-Za-z])""").replace(value, "∈").replace(36.toChar().toString(), "").trim()
 }
 
 @Composable
@@ -425,7 +428,8 @@ private fun CodeBlock(lang: String, code: String) {
     val clipboard = LocalClipboardManager.current
     val buzz = hapticAction()
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = Color(0xFF171A21),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier
             .fillMaxWidth()
@@ -436,20 +440,20 @@ private fun CodeBlock(lang: String, code: String) {
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
+                    .background(Color(0xFF20242D))
                     .padding(start = 12.dp),
             ) {
                 Text(
                     text = lang.uppercase().ifBlank { "CODE" },
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = Color(0xFFC7CBD4),
                     modifier = Modifier.weight(1f),
                 )
                 IconButton(onClick = { buzz(); clipboard.setText(AnnotatedString(code)) }) {
                     Icon(
                         Icons.Default.ContentCopy,
                         contentDescription = "Copy code",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = Color(0xFFC7CBD4),
                     )
                 }
             }
@@ -458,7 +462,7 @@ private fun CodeBlock(lang: String, code: String) {
                 softWrap = false,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 13.sp,
-                color = MaterialTheme.colorScheme.onSurface,
+                color = Color(0xFFF1F2F4),
                 modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 10.dp),
             )
         }

@@ -60,21 +60,13 @@ class SettingsStore(context: Context) {
     var persona by label("persona", if (systemPrompt == DEFAULT_SYSTEM_PROMPT) "Concise" else "Custom")
 
     /** CPU threads 2–8. Default 4 = optimal for Big.LITTLE performance cores. */
-    val device = DeviceProfile(context)
-    var threadMode by label("thread_mode", if (prefs.contains("threads")) "Manual" else "Balanced")
-    var autoBackend by flag("auto_backend", !prefs.contains("vulkan_offload") && !prefs.contains("vulkan_gpu_layers"))
     var threads: Int
-        get() = when (threadMode) {
-            "Battery" -> device.performanceCount.coerceIn(1, 2)
-            "Performance" -> device.performanceCount.coerceIn(1, 4)
-            "Balanced" -> device.performanceCount.coerceIn(1, 4)
-            else -> prefs.getInt("threads", 4)
-        }
+        get() = prefs.getInt("threads", 4)
         set(v) { prefs.edit().putInt("threads", v.coerceIn(2, 8)).apply() }
 
     /** Context size 1024–8192. Applies on next model load. */
     var contextSize: Int
-        get() = prefs.getInt("context_size", device.defaultContext)
+        get() = prefs.getInt("context_size", 2048)
         set(v) { prefs.edit().putInt("context_size", v.coerceIn(1024, 8192)).apply() }
 
     var temperature: Double
