@@ -3,6 +3,7 @@ package com.littlebit.chat.ui.theme
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.sp
 import com.littlebit.chat.data.SettingsStore
@@ -26,19 +27,24 @@ fun LittleBitTheme(settings: SettingsStore, content: @Composable () -> Unit) {
     val base = if (dark) darkColorScheme() else lightColorScheme()
     val black = settings.theme == "AMOLED Pure Black"
     val accent = Color(if (dark) accents.first else accents.second)
-    val paper = if (dark) Color(0xFF111615) else Color(0xFFF8FAF7)
-    val card = if (dark) Color(0xFF202725) else Color(0xFFE9EFEB)
+    val paper = when { black -> Color.Black; dark -> Color(0xFF0F1115); else -> Color(0xFFF8F9FA) }
+    val card = when { black -> Color(0xFF0E0E11); dark -> Color(0xFF171A21); else -> Color.White }
+    val pill = when { black -> Color(0xFF17171C); dark -> Color(0xFF20242D); else -> Color(0xFFEEF0F3) }
+    val edge = when { black -> Color(0xFF24242B); dark -> Color(0xFF323641); else -> Color(0xFFE2E5EA) }
+    val ink = if (dark) Color(0xFFF0F0F3) else Color(0xFF21252B)
+    val muted = if (dark) Color(0xFFB9BDC7) else Color(0xFF535B66)
+    val tint = accent.copy(alpha = .14f).compositeOver(card)
     val colors = base.copy(primary = accent, secondary = accent, tertiary = accent,
         onPrimary = if (dark) Color.Black else Color.White,
-        background = if (black) Color.Black else paper,
-        surface = if (black) Color.Black else paper,
-        surfaceContainer = if (black) Color(0xFF0D0D0F) else card,
-        surfaceContainerHighest = if (black) Color(0xFF0D0D0F) else card,
-        surfaceVariant = if (black) Color(0xFF0D0D0F) else card)
+        primaryContainer = tint, onPrimaryContainer = ink, secondaryContainer = tint, onSecondaryContainer = ink,
+        background = paper, onBackground = ink, surface = paper, onSurface = ink, onSurfaceVariant = muted,
+        surfaceContainerLowest = paper, surfaceContainerLow = card, surfaceContainer = card,
+        surfaceContainerHigh = card, surfaceContainerHighest = card, surfaceVariant = pill, outlineVariant = edge)
     val typography = Typography()
     CompositionLocalProvider(LocalHapticsEnabled provides settings.haptics) {
         MaterialTheme(colorScheme = colors,
-            typography = typography.copy(bodyLarge = typography.bodyLarge.copy(fontSize = settings.font.sp, lineHeight = (settings.font + 8).sp)),
+            typography = typography.copy(headlineSmall = typography.headlineSmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Serif),
+                labelSmall = typography.labelSmall.copy(letterSpacing = .45.sp), bodyLarge = typography.bodyLarge.copy(fontSize = settings.font.sp, lineHeight = (settings.font * 1.5f).sp)),
             content = content)
     }
 }

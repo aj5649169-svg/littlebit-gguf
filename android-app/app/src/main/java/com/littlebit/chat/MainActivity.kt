@@ -195,10 +195,10 @@ private fun DrawerContent(
     onOpenPlugins: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
-    Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+    Column(Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
         Text("LittleBit Chat", style = MaterialTheme.typography.titleLarge)
         Text(
-            vm.modelName?.let { com.littlebit.chat.ui.modelTitle(it) } ?: "No model loaded",
+            vm.modelName?.let { "●   " + com.littlebit.chat.ui.modelTitle(it) } ?: "No model loaded",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
@@ -208,8 +208,8 @@ private fun DrawerContent(
 
         Surface(
             onClick = onNewChat,
-            shape = RoundedCornerShape(12.dp),
-            color = MaterialTheme.colorScheme.primary,
+            shape = RoundedCornerShape(28.dp),
+            color = MaterialTheme.colorScheme.primaryContainer,
             modifier = Modifier.fillMaxWidth(),
         ) {
             Row(
@@ -219,12 +219,12 @@ private fun DrawerContent(
                 Icon(
                     Icons.Default.Add,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimary,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
                     "New Chat",
-                    color = MaterialTheme.colorScheme.onPrimary,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
                     style = MaterialTheme.typography.titleSmall,
                 )
             }
@@ -240,7 +240,7 @@ private fun DrawerContent(
 
         var query by remember { mutableStateOf("") }
         androidx.compose.material3.OutlinedTextField(query, { query = it }, singleLine = true,
-            label = { Text("Search chats") }, modifier = Modifier.fillMaxWidth())
+            shape = RoundedCornerShape(24.dp), label = { Text("Search chats") }, modifier = Modifier.fillMaxWidth())
         LazyColumn(Modifier.weight(1f, fill = false)) {
             val today = java.time.LocalDate.now()
             val zone = java.time.ZoneId.systemDefault()
@@ -274,7 +274,7 @@ private fun DrawerContent(
         HorizontalDivider(Modifier.padding(vertical = 8.dp))
 
         NavigationDrawerItem(
-            label = { Text("Download Models") },
+            label = { Text("Model Hub") },
             selected = false,
             onClick = onOpenModelHub,
             icon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },

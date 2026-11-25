@@ -74,8 +74,6 @@ internal object LlamaJni {
     external fun nativeReset(handle: Long)
     external fun nativePromptSize(handle: Long, prompt: String): Int
     external fun nativeStop(handle: Long)
-    external fun nativeConserve(handle: Long, enabled: Boolean)
-    external fun nativeSynchronize(handle: Long)
-    external fun nativeSetThreads(handle: Long, threads: Int, batch: Int, cores: IntArray)
+    external fun nativeSetThreads(handle: Long, threads: Int)
     external fun nativeUnload(handle: Long)
 }

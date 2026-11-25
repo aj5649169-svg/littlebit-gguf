@@ -30,8 +30,8 @@ android {
         applicationId = "com.littlebit.chat"
         minSdk = 28          // matches -DANDROID_PLATFORM=android-28 in scripts/build-android.sh
         targetSdk = 35
-        versionCode = 6
-        versionName = "1.1.1"
+        versionCode = 7
+        versionName = "1.1.2-v1.1-engine"
 
         ndk {
             // Native engine is arm64-only: KleidiAI kernels + LittleBit path are built for arm64-v8a.

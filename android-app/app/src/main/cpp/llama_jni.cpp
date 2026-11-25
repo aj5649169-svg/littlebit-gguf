@@ -10,12 +10,6 @@
 
 #include <llama.h>
 #include <ggml-backend.h>
-#include <ggml-cpu.h>
-#include <cstdio>
-#include <unistd.h>
-#ifdef __ANDROID__
-#include <vulkan/vulkan.h>
-#endif
 
 #include <algorithm>
 #include <atomic>
@@ -61,10 +55,6 @@ struct NativeEngine {
     double ttft_ms = 0, prefill_rate = 0, decode_rate = 0;
     llama_context_params params{};
     NativeEngine * draft = nullptr; // Kotlin holds both handles under the same engine mutex.
-    std::atomic<bool> conserve{false};
-    ggml_threadpool_t pool = nullptr;
-    std::vector<jint> pool_cores;
-    int pool_size = 0;
     bool owns_model = true;
     int                 gpu_layers = 0;
     // UTF-8 code points may span token-piece boundaries or a speculative
@@ -271,38 +261,6 @@ bool flushUtf8Tail(JNIEnv * env, jobject callback, std::string & pending) {
     if (complete < pending.size()) ready.append("\xEF\xBF\xBD");
     pending.clear();
     return deliverUtf8(env, callback, ready);
-}
-
-// Auto uses conservative capability floors. Manual mode still allows a
-// device-specific comparison on GPUs that fall below the heuristic.
-bool suitableGpu() {
-#ifdef __ANDROID__
-    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    app.apiVersion = VK_API_VERSION_1_0;
-    VkInstanceCreateInfo info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-    info.pApplicationInfo = &app;
-    VkInstance instance;
-    if (vkCreateInstance(&info, nullptr, &instance) != VK_SUCCESS) return false;
-    uint32_t count = 0;
-    bool suitable = false;
-    if (vkEnumeratePhysicalDevices(instance, &count, nullptr) == VK_SUCCESS && count) {
-        std::vector<VkPhysicalDevice> devices(count);
-        if (vkEnumeratePhysicalDevices(instance, &count, devices.data()) == VK_SUCCESS) {
-            VkPhysicalDeviceProperties p{};
-            vkGetPhysicalDeviceProperties(devices.front(), &p);
-            std::string name(p.deviceName);
-            suitable = p.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU &&
-                p.apiVersion >= VK_API_VERSION_1_1 && p.limits.maxComputeWorkGroupInvocations >= 128 &&
-                p.limits.maxComputeSharedMemorySize >= 16384 &&
-                name.find("Mali-G610") == std::string::npos && name.find("Mali-G52") == std::string::npos &&
-                name.find("Mali-G57") == std::string::npos;
-        }
-    }
-    vkDestroyInstance(instance, nullptr);
-    return suitable;
-#else
-    return false;
-#endif
 }
 
 bool hasVulkanComputeDevice() {
@@ -579,7 +537,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeLoadModel(
             pst = std::make_unique<ProgressState>(ProgressState{env, progress_ref});
         }
 
-        const int requested_gpu_layers = n_gpu_layers == -1 ? (suitableGpu() ? 99 : 0) : std::max(0, static_cast<int>(n_gpu_layers));
+        const int requested_gpu_layers = std::max(0, static_cast<int>(n_gpu_layers));
         const bool vulkan_ready = requested_gpu_layers > 0 && hasVulkanComputeDevice();
         if (requested_gpu_layers > 0 && !vulkan_ready) {
             LOGE("Vulkan offload requested without a usable Vulkan compute device; falling back to CPU/KleidiAI");
@@ -605,22 +563,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeLoadModel(
                 mparams.progress_callback = pst ? progressThunk : nullptr;
                 mparams.progress_callback_user_data = pst.get();
 
-                if (path.rfind("/proc/self/fd/", 0) == 0) {
-                    // SAF may grant reads on the open descriptor but deny reopening the path.
-                    const int fd = dup(std::stoi(path.substr(14)));
-                    FILE * raw = fd >= 0 ? fdopen(fd, "rb") : nullptr;
-                    if (fd >= 0 && !raw) close(fd);
-                    std::unique_ptr<FILE, decltype(&fclose)> input(raw, fclose);
-                    if (input && fseeko(input.get(), 0, SEEK_SET) == 0) {
-                        mparams.load_mode = LLAMA_LOAD_MODE_MMAP;
-                        engine->model = llama_model_load_from_file_ptr(input.get(), mparams);
-                    }
-                    if (!engine->model && !(pst && pst->cancelled)) {
-                        engine->model = llama_model_load_from_file(path.c_str(), mparams);
-                    }
-                } else {
-                    engine->model = llama_model_load_from_file(path.c_str(), mparams);
-                }
+                engine->model = llama_model_load_from_file(path.c_str(), mparams);
                 if (engine->model == nullptr) {
                     throw std::runtime_error("llama_model_load_from_file returned null");
                 }
@@ -867,9 +810,8 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
         const auto prefill_start = std::chrono::steady_clock::now();
         e->in_prefill.store(true);
         env->CallVoidMethod(cb, g_prefill, lcp, n_prompt);
-        for (int i0 = lcp; i0 < n_prompt && !e->stop.load(); ) {
-            const int step = e->conserve.load() ? 16 : (n_prompt - lcp <= 128 ? 16 : (i0 == lcp ? 16 : n_batch));
-            const int chunk = std::min({step, n_batch, n_prompt - i0});
+        for (int i0 = lcp; i0 < n_prompt && !e->stop.load(); i0 += n_batch) {
+            const int chunk = std::min(n_batch, n_prompt - i0);
             llama_batch_ext * b = llama_batch_ext_init(e->ctx);
             if (b == nullptr) { callOnError(env, cb, "could not allocate prompt batch"); failed = true; break; }
             for (int i = 0; i < chunk; i++) {
@@ -894,7 +836,6 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeGenerate(
             e->cached_tokens.insert(e->cached_tokens.end(), prompt_tokens.begin() + i0,
                                     prompt_tokens.begin() + i0 + chunk);
             e->n_past += chunk;
-            i0 += chunk;
             env->CallVoidMethod(cb, g_prefill, e->n_past, n_prompt);
         }
 
@@ -985,39 +926,10 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeStop(JNIEnv *, jobject, jlong hand
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_littlebit_chat_engine_LlamaJni_nativeConserve(JNIEnv *, jobject, jlong h, jboolean on) {
-    if (auto * e = reinterpret_cast<NativeEngine *>(h)) e->conserve.store(on);
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_littlebit_chat_engine_LlamaJni_nativeSynchronize(JNIEnv *, jobject, jlong h) {
-    if (auto * e = reinterpret_cast<NativeEngine *>(h)) llama_synchronize(e->ctx);
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_littlebit_chat_engine_LlamaJni_nativeSetThreads(JNIEnv *env, jobject, jlong handle, jint threads, jint batch, jintArray cores) {
+Java_com_littlebit_chat_engine_LlamaJni_nativeSetThreads(JNIEnv *, jobject, jlong handle, jint threads) {
     auto * e = reinterpret_cast<NativeEngine *>(handle);
     if (e != nullptr && e->ctx != nullptr && threads > 0) {
-        const int size = std::max(threads, batch);
-        std::vector<jint> ids(env->GetArrayLength(cores));
-        if (!ids.empty()) env->GetIntArrayRegion(cores, 0, ids.size(), ids.data());
-        if (e->pool_size != size || e->pool_cores != ids) {
-            if (e->pool) {
-                llama_detach_threadpool(e->ctx);
-                ggml_threadpool_free(e->pool);
-                e->pool = nullptr;
-            }
-            e->pool_size = size;
-            e->pool_cores = ids;
-            if (!ids.empty()) {
-                auto p = ggml_threadpool_params_default(size);
-                p.poll = 0;
-                for (auto id : ids) if (id >= 0 && id < GGML_MAX_N_THREADS) p.cpumask[id] = true;
-                e->pool = ggml_threadpool_new(&p);
-                if (e->pool) llama_attach_threadpool(e->ctx, e->pool, nullptr);
-            }
-        }
-        llama_set_n_threads(e->ctx, threads, batch);
+        llama_set_n_threads(e->ctx, threads, threads);
     }
 }
 
@@ -1025,7 +937,6 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_littlebit_chat_engine_LlamaJni_nativeUnload(JNIEnv *, jobject, jlong handle) {
     auto * e = reinterpret_cast<NativeEngine *>(handle);
     if (e == nullptr) return;
-    if (e->pool) { llama_detach_threadpool(e->ctx); ggml_threadpool_free(e->pool); }
     if (e->ctx != nullptr) llama_free(e->ctx);
     if (e->owns_model && e->model != nullptr) llama_model_free(e->model);
     delete e;

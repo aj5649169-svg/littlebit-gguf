@@ -1,5 +1,8 @@
 package com.littlebit.chat.ui
 
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.foundation.layout.size
 import android.app.ActivityManager
 import android.content.Context
 import androidx.compose.foundation.layout.Arrangement
@@ -128,49 +131,75 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                     }
                 }
             }
-            item(key = "inference-header") {
-                Text("Inference", style = MaterialTheme.typography.titleMedium)
-            }
-            if (vm.cooling) item { Text("Cooling · smaller prompt batches, Instant Reply paused") }
-            item { Choices("CPU profile", listOf("Battery", "Balanced", "Performance", "Manual"), settings.threadMode) {
-                settings.threadMode = it
-                threads = settings.threads.toFloat()
+            item { SettingPanel("Backend & Model") {
+                    SliderRow(
+                        label = "CPU Threads",
+                        value = threads,
+                        range = 2f..8f,
+                        steps = 5,
+                        display = threads.roundToInt().toString(),
+                        onChange = { threads = it },
+                        onChangeFinished = { vm.onThreadsChanged(threads.roundToInt()) },
+                    )
+                run {
+                    SliderRow(
+                        label = "Context Size",
+                        value = ctxSize,
+                        range = 1024f..8192f,
+                        steps = 27,
+                        display = ctxSize.roundToInt().toString(),
+                        onChange = { ctxSize = it },
+                        onChangeFinished = {
+                            settings.contextSize = (ctxSize.roundToInt() / 256) * 256
+                            ctxSize = settings.contextSize.toFloat()
+                        },
+                    )
+                }
+                    SwitchRow(
+                        title = "Vulkan GPU Offload",
+                        subtitle = "Enabled by default. Reload after changing backend.",
+                        checked = vulkanEnabled,
+                        onCheckedChange = {
+                            vulkanEnabled = it
+                            settings.vulkanOffload = it
+                        },
+                    )
+                if (vulkanEnabled) {
+                    run {
+                        Column {
+                            SliderRow(
+                                label = "GPU Layers (n_gpu_layers)",
+                                value = gpuLayers,
+                                range = 0f..99f,
+                                steps = 98,
+                                display = gpuLayers.roundToInt().toString(),
+                                onChange = { gpuLayers = it },
+                                onChangeFinished = {
+                                    settings.vulkanGpuLayers = gpuLayers.roundToInt()
+                                    gpuLayers = settings.vulkanGpuLayers.toFloat()
+                                },
+                            )
+                            Text(
+                                "Reload model after changing GPU offload. On Mali GPUs, compare t/s against CPU KleidiAI.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 2.dp),
+                            )
+                        }
+                    }
+                }
             } }
-            if (settings.threadMode == "Manual") item(key = "threads") {
-                SliderRow(
-                    label = "CPU Threads",
-                    value = threads,
-                    range = 2f..8f,
-                    steps = 5,
-                    display = threads.roundToInt().toString(),
-                    onChange = { threads = it },
-                    onChangeFinished = { vm.onThreadsChanged(threads.roundToInt()) },
-                )
-            }
-            item(key = "ctx") {
-                SliderRow(
-                    label = "Context Size",
-                    value = ctxSize,
-                    range = 1024f..8192f,
-                    steps = 27,
-                    display = ctxSize.roundToInt().toString(),
-                    onChange = { ctxSize = it },
-                    onChangeFinished = {
-                        settings.contextSize = (ctxSize.roundToInt() / 256) * 256
-                        ctxSize = settings.contextSize.toFloat()
-                    },
-                )
-            }
-            item { Text("Appearance", style = MaterialTheme.typography.titleMedium) }
-            item { Choices("Theme", listOf("System","Dark","Light","AMOLED Pure Black"), settings.theme) { settings.theme = it } }
-            item { Choices("Accent", listOf("Emerald","Ocean Blue","Violet","Amber","Rose"), settings.accent) { settings.accent = it } }
-            item { Choices("Chat text", listOf("Compact 13sp","Normal 15sp","Large 17sp"),
+            item { SettingPanel("Appearance") {
+                    Choices("Theme", listOf("System","Dark","Light","AMOLED Pure Black"), settings.theme) { settings.theme = it }
+                    Choices("Accent", listOf("Emerald","Ocean Blue","Violet","Amber","Rose"), settings.accent) { settings.accent = it }
+                    Choices("Chat text", listOf("Compact 13sp","Normal 15sp","Large 17sp"),
                 when(settings.font) { 13 -> "Compact 13sp"; 17 -> "Large 17sp"; else -> "Normal 15sp" }) {
                 settings.font = it.substringAfter(' ').removeSuffix("sp").toInt()
+            }
+                    SwitchRow("Haptics", "Feedback on chat actions", settings.haptics) { settings.haptics = it }
+                    SwitchRow("Performance caption", "Tap the speed below a reply for details", settings.showPerformance) { settings.showPerformance = it }
             } }
-            item { SwitchRow("Haptics", "Feedback on chat actions", settings.haptics) { settings.haptics = it } }
-            item { SwitchRow("Performance caption", "Tap the speed below a reply for details", settings.showPerformance) { settings.showPerformance = it } }
-            item {
+            item { SettingPanel("Persona & Prompt") {
                 val presets = mapOf("Concise" to SettingsStore.DEFAULT_SYSTEM_PROMPT,
                     "Coder" to "Write correct code. Explain choices briefly.",
                     "Study Tutor" to "Teach step by step, with examples and checks for understanding.",
@@ -179,8 +208,25 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                     settings.persona = it
                     systemPrompt = presets[it] ?: settings.customPrompt
                     settings.systemPrompt = systemPrompt
-                    vm.promptChanged()
+                    vm.invalidateDraft()
                 }
+                Column {
+                    Text("System Prompt", style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = systemPrompt,
+                        onValueChange = {
+                            systemPrompt = it
+                            settings.persona = "Custom"
+                            settings.customPrompt = it
+                            settings.systemPrompt = it
+                            vm.invalidateDraft()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 3,
+                    )
+                }
+            }
             }
             if (vm.isLoaded || settings.benchmarkHistory != "[]") item {
                 Card { Column(Modifier.padding(14.dp)) {
@@ -194,24 +240,6 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                     for (i in 0 until rows.length()) Text(rows.getString(i), modifier = Modifier.padding(vertical = 4.dp),
                         style = MaterialTheme.typography.bodySmall)
                 } }
-            }
-            item(key = "sysprompt") {
-                Column {
-                    Text("System Prompt", style = MaterialTheme.typography.titleSmall)
-                    Spacer(Modifier.height(6.dp))
-                    OutlinedTextField(
-                        value = systemPrompt,
-                        onValueChange = {
-                            systemPrompt = it
-                            settings.persona = "Custom"
-                            settings.customPrompt = it
-                            settings.systemPrompt = it
-                            vm.promptChanged()
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 3,
-                    )
-                }
             }
             item(key = "features-header") {
                 Text("Features", style = MaterialTheme.typography.titleMedium)
@@ -232,45 +260,10 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                     onCheckedChange = vm::updateFastMode,
                 )
             }
-            item { SwitchRow("Automatic backend", "Choose full Vulkan or CPU on model load", settings.autoBackend) { settings.autoBackend = it } }
-            if (!settings.autoBackend) item(key = "vulkan") {
-                SwitchRow(
-                    title = "Vulkan GPU Offload",
-                    subtitle = "Enabled by default. Reload after changing backend.",
-                    checked = vulkanEnabled,
-                    onCheckedChange = {
-                        vulkanEnabled = it
-                        settings.vulkanOffload = it
-                    },
-                )
-            }
-            if (!settings.autoBackend && vulkanEnabled) {
-                item(key = "vulkan-layers") {
-                    Column {
-                        SliderRow(
-                            label = "GPU Layers (n_gpu_layers)",
-                            value = gpuLayers,
-                            range = 0f..99f,
-                            steps = 98,
-                            display = gpuLayers.roundToInt().toString(),
-                            onChange = { gpuLayers = it },
-                            onChangeFinished = {
-                                settings.vulkanGpuLayers = gpuLayers.roundToInt()
-                                gpuLayers = settings.vulkanGpuLayers.toFloat()
-                            },
-                        )
-                        Text(
-                            "Reload model after changing GPU offload. On Mali GPUs, compare t/s against CPU KleidiAI.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 2.dp),
-                        )
-                    }
-                }
-            }
             item {
-                TextButton(onClick = { advanced = !advanced }) {
+                androidx.compose.material3.OutlinedCard(modifier = Modifier.fillMaxWidth()) { TextButton(onClick = { advanced = !advanced }) {
                     Text(if (advanced) "Advanced Sampling & Engine  ▴" else "Advanced Sampling & Engine  ▾")
+                }
                 }
             }
             if (advanced) {
@@ -321,9 +314,9 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
 
 @Composable
 private fun RamBanner(total: Long, avail: Long) {
-    Card(shape = RoundedCornerShape(16.dp)) {
+    Card(border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), shape = RoundedCornerShape(18.dp)) {
         Column(Modifier.padding(14.dp)) {
-            Text("Device RAM", style = MaterialTheme.typography.labelMedium)
+            Text("Device & Memory", style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.height(4.dp))
             if (total > 0) {
                 Text(
@@ -389,7 +382,7 @@ private fun SwitchRow(
     onCheckedChange: (Boolean) -> Unit,
 ) {
     val buzz = hapticAction()
-    Card(shape = RoundedCornerShape(16.dp)) {
+    Card(border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), shape = RoundedCornerShape(18.dp)) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
@@ -417,9 +410,32 @@ private fun Choices(title: String, choices: List<String>, selected: String, choo
         Text(title, style = MaterialTheme.typography.titleSmall)
         androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             choices.forEach { item ->
-                androidx.compose.material3.FilterChip(selected = selected == item,
+                if (title == "Accent") {
+                    val swatches = mapOf("Emerald" to 0xff31795e, "Ocean Blue" to 0xff376e9d,
+                        "Violet" to 0xff7854a1, "Amber" to 0xff8a631a, "Rose" to 0xffa04d69)
+                    androidx.compose.material3.IconButton(onClick = { buzz(); choose(item) },
+                        modifier = Modifier.semantics { contentDescription = if (selected == item) "$item, selected" else item }) {
+                        androidx.compose.material3.Surface(shape = androidx.compose.foundation.shape.CircleShape,
+                            color = androidx.compose.ui.graphics.Color(swatches.getValue(item))) {
+                            androidx.compose.foundation.layout.Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+                                if (selected == item) Text("✓", color = androidx.compose.ui.graphics.Color.White)
+                            }
+                        }
+                    }
+                } else androidx.compose.material3.FilterChip(shape = RoundedCornerShape(24.dp), selected = selected == item,
                     onClick = { buzz(); choose(item) }, label = { Text(item) })
             }
+        }
+    }
+}
+
+@Composable
+private fun SettingPanel(title: String, content: @Composable () -> Unit) {
+    Card(border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        shape = RoundedCornerShape(18.dp)) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            content()
         }
     }
 }

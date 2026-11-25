@@ -58,8 +58,6 @@ endif()
 # llama.cpp + ggml configuration — keep in sync with scripts/build-android.sh
 # ---------------------------------------------------------------------------
 set(BUILD_SHARED_LIBS      OFF  CACHE BOOL "" FORCE)  # static libs linked into libllama_jni.so
-set(GGML_BACKEND_DL OFF CACHE BOOL "Static Android backend registry" FORCE)
-set(GGML_CPU_ALL_VARIANTS OFF CACHE BOOL "KleidiAI selects ISA kernels at runtime" FORCE)
 set(GGML_NATIVE            OFF  CACHE BOOL "" FORCE)
 set(GGML_CPU_KLEIDIAI      ON   CACHE BOOL "" FORCE)
 set(GGML_OPENMP            OFF  CACHE BOOL "" FORCE)
