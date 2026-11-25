@@ -107,8 +107,11 @@ class LlamaEngine {
     fun reset() = LlamaJni.nativeReset(handle)
     fun promptSize(prompt: String) = LlamaJni.nativePromptSize(handle, prompt)
 
-    fun setThreads(threads: Int) {
-        if (handle != 0L) LlamaJni.nativeSetThreads(handle, threads)
+    @Synchronized fun conserve(enabled: Boolean) = LlamaJni.nativeConserve(handle, enabled)
+    fun synchronize() = LlamaJni.nativeSynchronize(handle)
+
+    fun setThreads(threads: Int, batch: Int = threads, cores: IntArray = intArrayOf()) {
+        if (handle != 0L) LlamaJni.nativeSetThreads(handle, threads, batch, cores)
     }
 
     private var draft: LlamaEngine? = null

@@ -38,6 +38,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private val engine = LlamaEngine()
     val settings = SettingsStore(app)
+    var cooling by mutableStateOf(false)
+        private set
+    private var unobserveHeat: () -> Unit = {}
+    @Volatile private var memoryPressure = false
+    private val memoryCallbacks = object : android.content.ComponentCallbacks2 {
+        override fun onConfigurationChanged(config: android.content.res.Configuration) {}
+        override fun onLowMemory() = pressure()
+        override fun onTrimMemory(level: Int) {
+            if (level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
+                level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) pressure()
+        }
+        private fun pressure() {
+            memoryPressure = true
+            cancelPrewarm()
+            engine.conserve(true)
+        }
+    }
     private val store = ChatStore(File(app.filesDir, "chats/chats.json"))
 
     // ------------------------------------------------------------------ model
@@ -162,10 +179,17 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         private set
     private var speculative: SpeculativeDraft? = null
     private var prewarmJob: Job? = null
+    private var debounceJob: Job? = null
 
     private val engineMutex = Mutex()
 
     init {
+        app.registerComponentCallbacks(memoryCallbacks)
+        unobserveHeat = settings.device.observeHeat { hot ->
+            cooling = hot
+            if (hot) cancelPrewarm()
+            engine.conserve(hot || memoryPressure)
+        }
         store.load()
         val restored = store.sessions.firstOrNull()
         if (restored != null) activate(restored) else createChat()
@@ -275,9 +299,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             Uri.parse(source), android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
     }
 
-    fun loadModelFromUri(uri: Uri) {
+    var pendingImport by mutableStateOf<Uri?>(null)
+        private set
+    fun dismissImport() { pendingImport = null }
+    fun importCopy(uri: Uri) = openDocument(uri, true)
+    fun loadModelFromUri(uri: Uri) = openDocument(uri, false)
+
+    private fun openDocument(uri: Uri, copy: Boolean) {
         if (busy) return
         cancelLoad = false
+        pendingImport = null
         foreground("Loading model…", ::cancelModelLoad)
         canCancelLoad = true
         loadProgress = 0f
@@ -289,22 +320,27 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             copyTotalBytes = -1L
             try {
                 val app = getApplication<Application>()
-                val name = ModelFiles.queryDocumentMetadata(app, uri).first
+                val name = ModelFiles.queryDocumentMetadata(app, uri).first ?: "model.gguf"
                 isCopyingModel = false
-                if (name?.endsWith(".gguf", true) == true) {
+                if (!copy && name.endsWith(".gguf", true)) {
+                    runCatching { app.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
                     val descriptor = runCatching {
-                        app.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         app.contentResolver.openFileDescriptor(uri, "r")
                     }.getOrNull()
                     descriptor?.use {
                         val linked = File("/proc/self/fd/${it.fd}")
-                        if (linked.isFile && linked.length() > 0) {
+                        if (runCatching { android.system.Os.lseek(it.fileDescriptor, 0, android.system.OsConstants.SEEK_SET) }.isSuccess) {
                             loadFromFile(linked, name, uri.toString())
                             if (loadError == null || cancelLoad) return@launch
                         }
                     }
                 }
                 if (cancelLoad) return@launch
+                if (!copy) {
+                    pendingImport = uri
+                    loadStatus = null
+                    return@launch
+                }
                 loadError = null
                 isCopyingModel = true
                 loadStatus = "Importing a private copy…"
@@ -352,7 +388,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     draftName = null
                     if (uri != null) {
                         val app = getApplication<Application>()
-                        val name = ModelFiles.queryDocumentMetadata(app, uri).first ?: "Draft model"
+                        val name = ModelFiles.queryDocumentMetadata(app, uri).first ?: "model.gguf" ?: "Draft model"
                         val descriptor = requireNotNull(app.contentResolver.openFileDescriptor(uri, "r"))
                         descriptor.use {
                             val file = File("/proc/self/fd/${it.fd}")
@@ -426,7 +462,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         loadStatus = "Loading $name…"
         loadProgress = 0.35f
         try {
-            require(file.isFile && file.length() > 0L) {
+            require(source.startsWith("content://") || (file.isFile && file.length() > 0L)) {
                 "The selected model file is missing or empty."
             }
             require(name.endsWith(".gguf", ignoreCase = true)) {
@@ -447,7 +483,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     path = file.absolutePath,
                     contextSize = settings.contextSize,
                     threads = settings.threads,
-                    nGpuLayers = if (settings.vulkanOffload) settings.vulkanGpuLayers else 0,
+                    nGpuLayers = if (settings.autoBackend) -1 else if (settings.vulkanOffload) settings.vulkanGpuLayers else 0,
                     batch = settings.batch, flash = settings.flash,
                     onProgress = { progress ->
                         check(!cancelLoad) { "Load cancelled" }
@@ -502,9 +538,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Live-apply the thread count while a model is loaded. */
+    fun promptChanged() {
+        invalidateDraft()
+        resetPromptJob?.cancel()
+        resetPromptJob = viewModelScope.launch(Dispatchers.Default) {
+            engineMutex.withLock { engine.reset(); cacheSession = null }
+        }
+    }
+    private var resetPromptJob: Job? = null
+
+    private fun configureThreads(target: LlamaEngine) {
+        val count = settings.threads
+        val auto = settings.threadMode != "Manual"
+        val batch = if (settings.threadMode == "Performance") settings.device.performanceCount else count
+        target.setThreads(count, batch, if (auto) settings.device.fastCpus else intArrayOf())
+    }
+
     fun onThreadsChanged(n: Int) {
         settings.threads = n
-        if (!busy) viewModelScope.launch { engineMutex.withLock { if (engine.isLoaded) engine.setThreads(settings.threads) } }
+        if (!busy) viewModelScope.launch { engineMutex.withLock { if (engine.isLoaded) configureThreads(engine) } }
     }
 
     // --------------------------------------------------------- generation flow
@@ -669,7 +721,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         isPrefilling = rawStream.isEmpty()
         lastTokens = draft?.tokens ?: 0
         lastTps = 0.0
-        engine.setThreads(settings.threads)
+        configureThreads(engine)
+        memoryPressure = settings.device.memory().lowMemory
+        engine.conserve(cooling || memoryPressure)
         promptDecoded = false
         promptProgress = ""
         val progress: (Int, Int) -> Unit = { done, total ->
@@ -750,7 +804,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     activeBenchmark = bench
                     try {
                         val threads = settings.threads
-                        bench.setThreads(threads)
+                        configureThreads(bench)
                         val prompt = engine.formatChat(SettingsStore.DEFAULT_SYSTEM_PROMPT,
                             listOf("user" to ThinkBlocks.withNoThink("Explain how rain forms, step by step.")))
                         val result = bench.generate(prompt, LlamaEngine.SamplingParams(maxTokens = 96, seed = 42),
@@ -771,14 +825,16 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     // --------------------------------------------------------- pre-warm logic
     private fun schedulePrewarm(value: String) {
-        prewarmJob?.cancel()
+        debounceJob?.cancel()
         val text = value.trim()
         if (!instantReply || !engine.isLoaded || busy || attachment != null || text.startsWith("/calc ")) return
         if (text.isEmpty() || !ThinkBlocks.isSentenceComplete(text)) return
-        prewarmJob = viewModelScope.launch {
+        debounceJob = viewModelScope.launch {
             delay(1800) // debounce: user paused typing
             if (input.trim() != text) return@launch
-            if (!engine.isLoaded || isGenerating || speculative != null) return@launch
+            if (!engine.isLoaded || busy || speculative != null || !settings.device.warmAllowed()) return@launch
+            prewarmJob?.join()
+            if (busy || input.trim() != text) return@launch
             startPrewarm(text)
         }
     }
@@ -795,7 +851,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     val prompt = formatPrompt(text)
                     draft.formatted = prompt
                     val limit = minOf(384, settings.maxTokens)
-                    val res = engine.generate(prompt, draft.sampling.copy(maxTokens = limit)) { piece ->
+                    var nextMemoryCheck = 0L
+                    val job = kotlinx.coroutines.currentCoroutineContext()[Job]
+                    fun guard() {
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (job?.isActive != true || cooling || (now >= nextMemoryCheck && !settings.device.warmAllowed())) engine.stop()
+                        if (now >= nextMemoryCheck) nextMemoryCheck = now + 500
+                    }
+                    val res = engine.generate(prompt, draft.sampling.copy(maxTokens = limit), { _, _ -> guard() }) { piece ->
+                        guard()
                         draft.buffer.append(piece)
                         draft.tokens++
                     }
@@ -807,7 +871,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     draft.buffer.setLength(0)
                     draft.tokens = 0
                 } finally {
-                    engine.setThreads(settings.threads)
+                    engine.synchronize()
+                    configureThreads(engine)
                 }
             }
             preWarming = false
@@ -815,16 +880,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun cancelPrewarm() {
-        if (speculative != null || prewarmJob != null) {
+        debounceJob?.cancel()
+        if (speculative != null || prewarmJob?.isActive == true) {
             speculative = null
             preWarming = false
             engine.stop()
             prewarmJob?.cancel()
-            prewarmJob = null
         }
     }
 
     private suspend fun cancelPrewarmSuspend() {
+        debounceJob?.cancel()
+        resetPromptJob?.join()
         val job = prewarmJob
         speculative = null
         preWarming = false
@@ -835,6 +902,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        unobserveHeat()
+        getApplication<Application>().unregisterComponentCallbacks(memoryCallbacks)
         cancelLoad = true
         stopRequested = true
         activeBenchmark?.stop()

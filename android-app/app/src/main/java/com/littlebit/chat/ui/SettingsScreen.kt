@@ -131,7 +131,12 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
             item(key = "inference-header") {
                 Text("Inference", style = MaterialTheme.typography.titleMedium)
             }
-            item(key = "threads") {
+            if (vm.cooling) item { Text("Cooling · smaller prompt batches, Instant Reply paused") }
+            item { Choices("CPU profile", listOf("Battery", "Balanced", "Performance", "Manual"), settings.threadMode) {
+                settings.threadMode = it
+                threads = settings.threads.toFloat()
+            } }
+            if (settings.threadMode == "Manual") item(key = "threads") {
                 SliderRow(
                     label = "CPU Threads",
                     value = threads,
@@ -174,7 +179,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                     settings.persona = it
                     systemPrompt = presets[it] ?: settings.customPrompt
                     settings.systemPrompt = systemPrompt
-                    vm.invalidateDraft()
+                    vm.promptChanged()
                 }
             }
             if (vm.isLoaded || settings.benchmarkHistory != "[]") item {
@@ -201,7 +206,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                             settings.persona = "Custom"
                             settings.customPrompt = it
                             settings.systemPrompt = it
-                            vm.invalidateDraft()
+                            vm.promptChanged()
                         },
                         modifier = Modifier.fillMaxWidth(),
                         minLines = 3,
@@ -227,7 +232,8 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                     onCheckedChange = vm::updateFastMode,
                 )
             }
-            item(key = "vulkan") {
+            item { SwitchRow("Automatic backend", "Choose full Vulkan or CPU on model load", settings.autoBackend) { settings.autoBackend = it } }
+            if (!settings.autoBackend) item(key = "vulkan") {
                 SwitchRow(
                     title = "Vulkan GPU Offload",
                     subtitle = "Enabled by default. Reload after changing backend.",
@@ -238,7 +244,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                     },
                 )
             }
-            if (vulkanEnabled) {
+            if (!settings.autoBackend && vulkanEnabled) {
                 item(key = "vulkan-layers") {
                     Column {
                         SliderRow(

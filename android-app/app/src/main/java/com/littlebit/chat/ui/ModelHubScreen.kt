@@ -72,6 +72,8 @@ fun ModelHubScreen(vm: ChatViewModel, onBack: () -> Unit) {
         vm.refreshLocalModels()
     }
 
+    var allModels by remember { mutableStateOf(vm.settings.device.ramTier > 6) }
+    val modelBudget = remember { (vm.settings.device.memory().availMem - 350_000_000L - vm.settings.contextSize * 262144L).coerceAtLeast(0L) }
     val pickModel = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri -> uri?.let(vm::loadModelFromUri) }
@@ -250,8 +252,9 @@ fun ModelHubScreen(vm: ChatViewModel, onBack: () -> Unit) {
                     )
                 }
             } else {
+                if (vm.settings.device.ramTier <= 6) item { TextButton(onClick = { allModels = !allModels }) { Text(if (allModels) "Show memory-friendly models" else "Show all models") } }
                 for (tier in ModelsCatalog.TIER_ORDER) {
-                    val group = catalog.filter { it.tier == tier }
+                    val group = catalog.filter { it.tier == tier && (allModels || (it.tier == "ultra-light" && it.sizeGB * 1e9 <= modelBudget)) }
                     if (group.isEmpty()) continue
                     item(key = "tier-$tier") {
                         Column {
@@ -287,6 +290,12 @@ fun ModelHubScreen(vm: ChatViewModel, onBack: () -> Unit) {
         }
     }
 
+    vm.pendingImport?.let { uri ->
+        AlertDialog(onDismissRequest = vm::dismissImport, title = { Text("Import a private copy?") },
+            text = { Text("Direct loading was unavailable. Importing uses extra storage equal to the full model size.") },
+            confirmButton = { TextButton(onClick = { vm.importCopy(uri) }, enabled = !vm.busy) { Text("Import copy") } },
+            dismissButton = { TextButton(onClick = vm::dismissImport) { Text("Cancel") } })
+    }
     confirmHeavy?.let { entry ->
         AlertDialog(
             onDismissRequest = { confirmHeavy = null },

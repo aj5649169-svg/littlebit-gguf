@@ -198,7 +198,7 @@ private fun DrawerContent(
     Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
         Text("LittleBit Chat", style = MaterialTheme.typography.titleLarge)
         Text(
-            vm.modelName ?: "No model loaded",
+            vm.modelName?.let { com.littlebit.chat.ui.modelTitle(it) } ?: "No model loaded",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
