@@ -93,6 +93,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private var activeModelPath: String? = null
     var chatError by mutableStateOf<String?>(null)
         private set
+    var promptDecoded by mutableStateOf(false)
+        private set
     var promptProgress by mutableStateOf("")
         private set
     var isPrefilling by mutableStateOf(false)
@@ -574,9 +576,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         lastTokens = draft?.tokens ?: 0
         lastTps = 0.0
         engine.setThreads(settings.threads)
+        promptDecoded = false
         promptProgress = ""
         val progress: (Int, Int) -> Unit = { done, total ->
             if (stopRequested) engine.stop()
+            promptDecoded = total > 0 && done == total
             promptProgress = "$done / $total tokens"
         }
         val output = StringBuilder(rawStream)

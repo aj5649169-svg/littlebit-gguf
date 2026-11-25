@@ -151,7 +151,7 @@ fun ChatScreen(
                     ModelSelectorPill(
                         modelName = vm.modelName,
                         loaded = vm.isLoaded,
-                        status = when { vm.isPrefilling -> "Reading history"; vm.streamActive -> "Writing"; vm.isLoaded -> vm.activeBackendLabel; else -> "Model Hub" },
+                        status = when { vm.isPrefilling && vm.promptDecoded -> "Starting reply"; vm.isPrefilling -> "Reading history"; vm.streamActive -> "Writing"; vm.isLoaded -> vm.activeBackendLabel; else -> "Model Hub" },
                         onClick = onOpenModelHub,
                     )
                 },
@@ -314,7 +314,7 @@ private fun StreamingRow(vm: ChatViewModel) {
                 CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp)
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    "Reading prompt… ${vm.promptProgress}",
+                    if (vm.promptDecoded) "Waiting for first token…" else "Reading prompt… ${vm.promptProgress}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
