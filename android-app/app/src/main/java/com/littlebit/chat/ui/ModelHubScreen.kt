@@ -163,6 +163,7 @@ fun ModelHubScreen(vm: ChatViewModel, onBack: () -> Unit) {
                             modifier = Modifier.padding(top = 6.dp),
                         )
                     }
+                    if (vm.canCancelLoad) TextButton(onClick = vm::cancelModelLoad) { Text("Cancel load") }
                     if (vm.loadProgress >= 0f) {
                         if (vm.isCopyingModel && vm.copyTotalBytes <= 0L) {
                             LinearProgressIndicator(

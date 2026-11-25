@@ -48,6 +48,7 @@ fun BadgeChip(
 fun ModelSelectorPill(
     modelName: String?,
     loaded: Boolean,
+    status: String,
     onClick: () -> Unit,
 ) {
     Surface(
@@ -72,12 +73,15 @@ fun ModelSelectorPill(
                     ),
             )
             Spacer(Modifier.width(8.dp))
+            androidx.compose.foundation.layout.Column(Modifier.weight(1f, fill = false)) {
             Text(
-                text = modelName ?: "Select Model",
+                text = modelName?.removeSuffix(".gguf") ?: "Select model",
                 style = MaterialTheme.typography.titleSmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            Text(status, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            }
             Icon(
                 Icons.Default.KeyboardArrowDown,
                 contentDescription = null,

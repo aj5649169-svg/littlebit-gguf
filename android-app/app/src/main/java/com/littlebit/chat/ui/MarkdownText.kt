@@ -58,7 +58,7 @@ private sealed interface MdBlock {
     data class Math(val expression: String) : MdBlock
 }
 
-private fun parseMarkdown(text: String): List<MdBlock> {
+private fun parseMarkdown(text: String, checkpoint: (Int, Int) -> Unit = { _, _ -> }): List<MdBlock> {
     val blocks = mutableListOf<MdBlock>()
     val lines = text.replace("\r\n", "\n").split("\n")
     var paragraph = StringBuilder()
@@ -78,6 +78,12 @@ private fun parseMarkdown(text: String): List<MdBlock> {
         bullets = mutableListOf()
     }
 
+    var scannedRow = 0
+    var scannedOffset = 0
+    fun complete(row: Int) {
+        while (scannedRow < row) scannedOffset += lines[scannedRow++].length + 1
+        checkpoint(scannedOffset, blocks.size)
+    }
     var row = 0
     fun cells(line: String) = line.trim().trim('|').split('|').map { it.trim() }
     while (row < lines.size) {
@@ -158,6 +164,7 @@ private fun parseMarkdown(text: String): List<MdBlock> {
             flushParagraph()
             flushBullets()
             blocks.add(MdBlock.Paragraph(trimmed))
+            if (row < lines.size && '|' !in trimmed) complete(row)
             continue
         }
         val bulletMatch = Regex("^\\s*[-*•]\\s+(.*)$").find(line)
@@ -169,6 +176,7 @@ private fun parseMarkdown(text: String): List<MdBlock> {
         if (line.isBlank()) {
             flushParagraph()
             flushBullets()
+            if (row < lines.size) complete(row)
             continue
         }
         flushBullets()
@@ -282,16 +290,48 @@ private fun linked(text: String, color: Color, background: Color): AnnotatedStri
     }
 }
 
+private class StreamingMarkdown {
+    private var previous = ""
+    private var offset = 0
+    private val finished = mutableListOf<MdBlock>()
+
+    fun update(text: String): List<MdBlock> {
+        if (!text.startsWith(previous)) {
+            finished.clear()
+            offset = 0
+        }
+        previous = text
+        var committed = 0
+        var length = 0
+        val tail = parseMarkdown(text.substring(offset)) { end, count ->
+            length = end
+            committed = count
+        }
+        val result = finished + tail
+        finished.addAll(tail.take(committed))
+        offset += length
+        return result
+    }
+}
+
 @Composable
 fun MarkdownText(
     text: String,
     modifier: Modifier = Modifier,
     color: Color = LocalContentColor.current,
 ) {
-    val blocks = remember(text) { parseMarkdown(text) }
+    val parser = remember { StreamingMarkdown() }
+    val blocks = remember(text) { parser.update(text.replace("\r\n", "\n")) }
     val codeBg = MaterialTheme.colorScheme.surfaceVariant
     Column(modifier = modifier) {
         for (block in blocks) {
+            RenderBlock(block, color, codeBg)
+        }
+    }
+}
+
+@Composable
+private fun RenderBlock(block: MdBlock, color: Color, codeBg: Color) {
             when (block) {
                 is MdBlock.Paragraph -> Text(
                     text = linked(block.text, color, codeBg),
@@ -335,8 +375,6 @@ fun MarkdownText(
                 is MdBlock.Code -> CodeBlock(block.lang, block.code)
                 is MdBlock.Math -> MathBlock(block.expression)
             }
-        }
-    }
 }
 
 

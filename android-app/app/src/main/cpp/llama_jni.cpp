@@ -118,13 +118,14 @@ jmethodID getMethod(JNIEnv * env, jclass clazz, const char * name, const char * 
 struct ProgressState {
     JNIEnv * env;
     jobject  cb;
+    bool cancelled = false;
 };
 
 bool progressThunk(float progress, void * user_data) {
     auto * st = static_cast<ProgressState *>(user_data);
     if (st != nullptr && st->cb != nullptr && g_progress_on_progress != nullptr) {
         st->env->CallVoidMethod(st->cb, g_progress_on_progress, progress);
-        if (st->env->ExceptionCheck()) { st->env->ExceptionClear(); return false; }
+        if (st->env->ExceptionCheck()) { st->env->ExceptionClear(); st->cancelled = true; return false; }
     }
     return true;
 }
@@ -531,6 +532,7 @@ Java_com_littlebit_chat_engine_LlamaJni_nativeLoadModel(
                 engine->model = nullptr;
             }
             engine->vocab = nullptr;
+            if (pst && pst->cancelled) break;
             if (layers > 0) {
                 LOGE("Vulkan model/context initialization failed (%s); retrying CPU/KleidiAI",
                      last_error.c_str());

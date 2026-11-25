@@ -227,10 +227,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun persistStreamingDraft() {
-        val s = currentSession ?: return
+    private fun persistStreamingDraft(s: ChatSession, history: List<ChatMessage>, partial: String) {
         try {
-            store.persistDraft(s, currentMessages.toList(), rawStream)
+            store.persistDraft(s, history, partial)
             store.lastError?.let { chatError = it }
         } catch (t: Throwable) {
             chatError = "Chat draft save failed: ${t.message ?: t.javaClass.simpleName}"
@@ -248,8 +247,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         loadError = null
     }
 
+    @Volatile private var cancelLoad = false
+    var canCancelLoad by mutableStateOf(false)
+        private set
+    fun cancelModelLoad() { cancelLoad = true; canCancelLoad = false; loadStatus = "Cancelling…" }
+
     fun loadModelFromUri(uri: Uri) {
         if (busy) return
+        cancelLoad = false
+        canCancelLoad = true
         loadProgress = 0f
         viewModelScope.launch(Dispatchers.IO) {
             loadError = null
@@ -260,6 +266,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val destination = ModelFiles.copyModelToAppStorage(getApplication(), uri) {
                     copiedBytes, totalBytes ->
+                    check(!cancelLoad) { "Import cancelled" }
                     copyTotalBytes = totalBytes
                     loadProgress = if (totalBytes > 0L) {
                         0.35f * (copiedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
@@ -273,10 +280,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 loadStatus = null
-                loadError = "Model copy failed: ${t.message ?: t.javaClass.simpleName}"
+                loadError = if (cancelLoad) null else "Model copy failed: ${t.message ?: t.javaClass.simpleName}"
             } finally {
                 isCopyingModel = false
                 copyTotalBytes = -1L
+                canCancelLoad = false
                 loadProgress = -1f
             }
         }
@@ -284,12 +292,15 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun loadLocalModel(file: File) {
         if (busy) return
+        cancelLoad = false
+        canCancelLoad = true
         loadProgress = 0f
         viewModelScope.launch(Dispatchers.IO) {
             loadError = null
             try {
                 loadFromFile(file)
             } finally {
+                canCancelLoad = false
                 loadProgress = -1f
             }
         }
@@ -350,9 +361,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     nGpuLayers = if (settings.vulkanOffload) settings.vulkanGpuLayers else 0,
                     batch = settings.batch, flash = settings.flash,
                     onProgress = { progress ->
+                        check(!cancelLoad) { "Load cancelled" }
                         loadProgress = 0.35f + (progress.coerceIn(0f, 1f) * 0.65f)
                     },
-                ).also { capacity = engine.metrics()[3].toInt() }
+                ).also {
+                    if (cancelLoad) { engine.unload(); error("Load cancelled") }
+                    capacity = engine.metrics()[3].toInt()
+                }
             }
             cacheSession = null
             used = 0
@@ -375,7 +390,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 activeModelPath = null
             }
             loadStatus = null
-            loadError = "Model load failed for ${file.name}: ${t.message ?: t.javaClass.simpleName}"
+            loadError = if (cancelLoad) null else "Model load failed for ${file.name}: ${t.message ?: t.javaClass.simpleName}"
         }
     }
 
@@ -421,6 +436,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         input = ""
         attachmentRequest++
         attachment = null
+        stopRequested = false
         isGenerating = true
         viewModelScope.launch(Dispatchers.Default) {
             var appended = false
@@ -456,7 +472,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun sendText(text: String) { if (!busy) { input = text; send() } }
-    fun stopGeneration() { engine.stop() }
+    @Volatile private var stopRequested = false
+    fun stopGeneration() { stopRequested = true; engine.stop() }
 
     fun removeMessage(index: Int) {
         if (busy || index !in currentMessages.indices) return
@@ -481,6 +498,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val previous = currentMessages.getOrNull(index) ?: return
         val user = currentMessages.getOrNull(index - 1) ?: return
         if (!previous.cutOff || user.role != "user") return
+        stopRequested = false
         isGenerating = true
         viewModelScope.launch(Dispatchers.Default) {
             try {
@@ -549,7 +567,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         lastTps = m[4]
     }
 
-    private fun generateReply(prompt: String, draft: SpeculativeDraft?, seed: String = "", replaceIndex: Int? = null) {
+    private suspend fun generateReply(prompt: String, draft: SpeculativeDraft?, seed: String = "", replaceIndex: Int? = null) = kotlinx.coroutines.coroutineScope {
         streamActive = true
         rawStream = seed + (draft?.buffer?.toString() ?: "")
         isPrefilling = rawStream.isEmpty()
@@ -557,12 +575,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         lastTps = 0.0
         engine.setThreads(settings.threads)
         promptProgress = ""
-        val progress: (Int, Int) -> Unit = { done, total -> promptProgress = "$done / $total tokens" }
+        val progress: (Int, Int) -> Unit = { done, total ->
+            if (stopRequested) engine.stop()
+            promptProgress = "$done / $total tokens"
+        }
         val output = StringBuilder(rawStream)
         var nextUpdate = 0L
         var nextSave = android.os.SystemClock.elapsedRealtime() + 2000L
+        var saveJob: Job? = null
+        val session = currentSession
+        val history = currentMessages.toList()
         var pieces = 0
         val accept: (String) -> Unit = { piece ->
+            if (stopRequested) engine.stop()
             output.append(piece)
             val now = android.os.SystemClock.elapsedRealtime()
             if (now >= nextUpdate) {
@@ -574,12 +599,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (pieces == 1 || pieces % 8 == 0) {
                 updateMetrics()
             }
-            if (now >= nextSave && replaceIndex == null) {
-                persistStreamingDraft()
+            if (now >= nextSave && replaceIndex == null && session != null && saveJob?.isActive != true) {
+                val partial = output.toString()
+                saveJob = launch(Dispatchers.IO) { persistStreamingDraft(session, history, partial) }
                 nextSave = now + 2000L
             }
         }
-        val result = when {
+        val result = try { when {
             draft == null -> engine.generate(prompt, samplingParams(), progress, accept)
             draft.isComplete -> requireNotNull(draft.result)
             else -> {
@@ -593,7 +619,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     engine.generate(prompt, samplingParams(), progress, accept)
                 } else continued.copy(tokens = continued.tokens + draft.tokens)
             }
+        } } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            LlamaEngine.GenerateResult(-1, pieces, 0.0, output.toString(), e.message)
         }
+        saveJob?.join()
         updateMetrics()
         rawStream = output.toString()
         lastTokens = result.tokens

@@ -26,17 +26,19 @@ fun LittleBitTheme(settings: SettingsStore, content: @Composable () -> Unit) {
     val base = if (dark) darkColorScheme() else lightColorScheme()
     val black = settings.theme == "AMOLED Pure Black"
     val accent = Color(if (dark) accents.first else accents.second)
+    val paper = if (dark) Color(0xFF111615) else Color(0xFFF8FAF7)
+    val card = if (dark) Color(0xFF202725) else Color(0xFFE9EFEB)
     val colors = base.copy(primary = accent, secondary = accent, tertiary = accent,
         onPrimary = if (dark) Color.Black else Color.White,
-        background = if (black) Color.Black else base.background,
-        surface = if (black) Color.Black else base.surface,
-        surfaceContainer = if (black) Color(0xFF0D0D0F) else base.surfaceContainer,
-        surfaceContainerHighest = if (black) Color(0xFF0D0D0F) else base.surfaceContainerHighest,
-        surfaceVariant = if (black) Color(0xFF0D0D0F) else base.surfaceVariant)
+        background = if (black) Color.Black else paper,
+        surface = if (black) Color.Black else paper,
+        surfaceContainer = if (black) Color(0xFF0D0D0F) else card,
+        surfaceContainerHighest = if (black) Color(0xFF0D0D0F) else card,
+        surfaceVariant = if (black) Color(0xFF0D0D0F) else card)
     val typography = Typography()
     CompositionLocalProvider(LocalHapticsEnabled provides settings.haptics) {
         MaterialTheme(colorScheme = colors,
-            typography = typography.copy(bodyLarge = typography.bodyLarge.copy(fontSize = settings.font.sp)),
+            typography = typography.copy(bodyLarge = typography.bodyLarge.copy(fontSize = settings.font.sp, lineHeight = (settings.font + 8).sp)),
             content = content)
     }
 }

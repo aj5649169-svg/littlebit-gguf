@@ -6,6 +6,10 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.collect
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -116,10 +120,15 @@ fun ChatScreen(
             (if (vm.streamActive) 1 else 0) +
             (if (vm.currentMessages.isEmpty() && !vm.streamActive) 1 else 0) + 1
 
-    val scrolling = listState.isScrollInProgress
-    LaunchedEffect(vm.currentSession?.id, totalItemCount, vm.rawStream.length, autoScrollEnabled, touchingList, scrolling) {
-        if (autoScrollEnabled && !touchingList && !listState.isScrollInProgress) {
-            listState.scrollToItem(totalItemCount - 1)
+    LaunchedEffect(listState, vm.currentSession?.id, totalItemCount) {
+        // Layout, including IME resize, tells us when the sentinel moves out
+        // of reach. No token text is observed by the screen scaffold.
+        snapshotFlow {
+            autoScrollEnabled && !touchingList && !listState.isScrollInProgress &&
+                listState.canScrollForward
+        }.collect { follow ->
+            if (follow && autoScrollEnabled && !touchingList && !listState.isScrollInProgress)
+                listState.scrollToItem(totalItemCount - 1)
         }
     }
 
@@ -129,18 +138,20 @@ fun ChatScreen(
     actionIndex?.let { MessageActions(vm, it) { actionIndex = null } }
     Scaffold(
         floatingActionButton = {
-            if (vm.streamActive && !autoScrollEnabled) {
+            AnimatedVisibility(vm.streamActive && !autoScrollEnabled) {
                 androidx.compose.material3.SmallFloatingActionButton(onClick = {
                     autoScrollEnabled = true
-                    scrollScope.launch { listState.scrollToItem(totalItemCount - 1) }
+                    scrollScope.launch { listState.animateScrollToItem(totalItemCount - 1) }
                 }) { Icon(Icons.Default.KeyboardArrowDown, "Jump to bottom") }
             }
-        },        topBar = {
+        },
+        topBar = {
             CenterAlignedTopAppBar(
                 title = {
                     ModelSelectorPill(
                         modelName = vm.modelName,
                         loaded = vm.isLoaded,
+                        status = when { vm.isPrefilling -> "Reading history"; vm.streamActive -> "Writing"; vm.isLoaded -> vm.activeBackendLabel; else -> "Model Hub" },
                         onClick = onOpenModelHub,
                     )
                 },
@@ -210,7 +221,7 @@ fun ChatScreen(
                 val message = vm.currentMessages[index]
                 MessageRow(
                     message = message,
-                    actions = { buzz(); actionIndex = index },
+                    actions = { buzz(); if (vm.streamActive) autoScrollEnabled = false; actionIndex = index },
                     isLast = index == vm.currentMessages.size - 1,
                     showStats = index == vm.currentMessages.size - 1 && !vm.streamActive,
                     vm = vm,
@@ -262,13 +273,10 @@ private fun MessageRow(
                 fontSize = vm.settings.font.sp,
             )
         } else {
-            val split = ThinkBlocks.split(message.content)
+            val split = remember(message.content) { ThinkBlocks.split(message.content) }
             Column(
                 modifier = Modifier
-                    .fillMaxWidth(0.92f)
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                    .fillMaxWidth().padding(horizontal = 6.dp, vertical = 10.dp),
             ) {
                 SelectionContainer {
                     Column {
@@ -299,10 +307,7 @@ private fun StreamingRow(vm: ChatViewModel) {
     val split = ThinkBlocks.split(vm.rawStream)
     Column(
         modifier = Modifier
-            .fillMaxWidth(0.92f)
-            .clip(RoundedCornerShape(18.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f))
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .fillMaxWidth().padding(horizontal = 6.dp, vertical = 10.dp),
     ) {
         if (vm.isPrefilling && vm.rawStream.isEmpty()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -316,7 +321,7 @@ private fun StreamingRow(vm: ChatViewModel) {
             }
         } else {
             if (split.think != null) ThinkAccordion(split.think)
-            MarkdownText(split.answer + " ▍")
+            MarkdownText(split.answer)
             Telemetry(vm)
         }
     }
@@ -352,13 +357,14 @@ private fun ThinkAccordion(think: String) {
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (expanded) {
-                Spacer(Modifier.height(6.dp))
+            AnimatedVisibility(visible = expanded) {
+                Column(Modifier.padding(top = 6.dp)) {
                 Text(
                     text = think,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                }
             }
         }
     }
@@ -449,7 +455,8 @@ private fun InputBar(vm: ChatViewModel) {
             .navigationBarsPadding()
             .imePadding(),
     ) {
-        vm.attachment?.let { file ->
+        AnimatedVisibility(vm.attachment != null) {
+            val file = vm.attachment ?: return@AnimatedVisibility
             TextButton(onClick = vm::clearAttachment) { Text(file.name + if (file.truncated) " · first 12 KiB   ×" else "   ×") }
         }
         if (vm.preWarming) {
@@ -470,79 +477,73 @@ private fun InputBar(vm: ChatViewModel) {
                 )
             }
         }
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 2.dp),
-            horizontalArrangement = Arrangement.End,
+        Surface(
+            shape = RoundedCornerShape(22.dp),
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
         ) {
-            Surface(
-                onClick = { buzz(); vm.updateFastMode(!vm.fastMode) },
-                shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-            ) {
-                Text(
-                    if (vm.fastMode) "⚡ Fast" else "🧠 Think",
-                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+            Column(Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) {
+                TextField(
+                    value = vm.input,
+                    onValueChange = vm::onInputChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = {
+                        Text(
+                            if (vm.isLoaded) "Message" else "Load a model to chat…",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                    ),
+                    maxLines = 5,
                 )
-            }
-        }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.Bottom,
-        ) {
-            IconButton(onClick = { showSheet = true }) {
-                Icon(Icons.Default.Add, contentDescription = "Attachments and plugins")
-            }
-            Surface(
-                shape = RoundedCornerShape(24.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier.weight(1f),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextField(
-                        value = vm.input,
-                        onValueChange = vm::onInputChange,
-                        modifier = Modifier.weight(1f),
-                        placeholder = {
-                            Text(
-                                if (vm.isLoaded) "Message" else "Load a model to chat…",
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { showSheet = true }) {
+                        Icon(Icons.Default.Add, contentDescription = "Attachments and plugins")
+                    }
+                    Surface(
+                        onClick = { buzz(); vm.updateFastMode(!vm.fastMode) },
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                    ) {
+                        Text(
+                            if (vm.fastMode) "Fast reply" else "Think",
+                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(Modifier.weight(1f))
+                    Spacer(Modifier.width(6.dp))
+                    val canSend = !vm.busy && ((vm.isLoaded && (vm.input.isNotBlank() || vm.attachment != null)) ||
+                        (vm.attachment == null && vm.settings.calculator && vm.input.trimStart().startsWith("/calc ")))
+                    Surface(
+                        enabled = vm.isGenerating || canSend,
+                        onClick = {
+                            buzz()
+                            keyboardController?.hide()
+                            focusManager.clearFocus()
+                            if (vm.isGenerating) vm.stopGeneration() else if (canSend) vm.send()
                         },
-                        colors = TextFieldDefaults.colors(
-                            focusedContainerColor = Color.Transparent,
-                            unfocusedContainerColor = Color.Transparent,
-                            focusedIndicatorColor = Color.Transparent,
-                            unfocusedIndicatorColor = Color.Transparent,
-                        ),
-                        maxLines = 5,
-                    )
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.alpha(if (vm.isGenerating || canSend) 1f else 0.4f),
+                    ) {
+                        Crossfade(vm.isGenerating, animationSpec = androidx.compose.animation.core.tween(120), label = "Send or stop") { generating ->
+                        Icon(
+                            if (generating) Icons.Default.Stop else Icons.AutoMirrored.Filled.Send,
+                            contentDescription = if (vm.isGenerating) "Stop generation" else "Send",
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.padding(12.dp),
+                        )
+                        }
+                    }
                 }
-            }
-            Spacer(Modifier.width(6.dp))
-            val canSend = !vm.busy && ((vm.isLoaded && (vm.input.isNotBlank() || vm.attachment != null)) ||
-                (vm.attachment == null && vm.settings.calculator && vm.input.trimStart().startsWith("/calc ")))
-            Surface(
-                onClick = {
-                    buzz()
-                    keyboardController?.hide()
-                    focusManager.clearFocus()
-                    if (vm.isGenerating) vm.stopGeneration() else if (canSend) vm.send()
-                },
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.alpha(if (vm.isGenerating || canSend) 1f else 0.4f),
-            ) {
-                Icon(
-                    if (vm.isGenerating) Icons.Default.Stop else Icons.AutoMirrored.Filled.Send,
-                    contentDescription = if (vm.isGenerating) "Stop generation" else "Send",
-                    tint = MaterialTheme.colorScheme.onPrimary,
-                    modifier = Modifier.padding(12.dp),
-                )
             }
         }
     }
@@ -573,15 +574,19 @@ private fun InputBar(vm: ChatViewModel) {
 @Composable
 private fun Telemetry(vm: ChatViewModel) {
     if (!vm.isLoaded || vm.used == 0) return
+    var details by remember { mutableStateOf(false) }
     val ratio = (vm.used.toFloat() / vm.capacity.coerceAtLeast(1)).coerceIn(0f, 1f)
     Column(Modifier.fillMaxWidth().padding(top = 6.dp)) {
-        Text("%s · %.0f ms TTFT · %.1f p/s · %.1f t/s".format(vm.activeBackendLabel, vm.ttft, vm.prefill, vm.lastTps),
+        TextButton(onClick = { details = !details }) {
+            Text(if (details) "Hide performance" else "%.1f t/s  ·  Performance".format(vm.lastTps))
+        }
+        if (details) Text("%s · %.0f ms TTFT · %.1f p/s · %.1f t/s".format(vm.activeBackendLabel, vm.ttft, vm.prefill, vm.lastTps),
             style = MaterialTheme.typography.labelSmall)
         androidx.compose.material3.LinearProgressIndicator(progress = { ratio }, modifier = Modifier.fillMaxWidth(),
             color = when { ratio >= .95f -> MaterialTheme.colorScheme.error
                 ratio >= .8f -> Color(0xFFFFB844)
                 else -> MaterialTheme.colorScheme.primary })
-        Text("${vm.used} / ${vm.capacity} tokens", style = MaterialTheme.typography.labelSmall)
+        if (details || ratio >= .8f) Text("${vm.used} / ${vm.capacity} tokens", style = MaterialTheme.typography.labelSmall)
         if (ratio >= .8f) TextButton(onClick = vm::newChatFromMeter) { Text("New chat") }
     }
 }
