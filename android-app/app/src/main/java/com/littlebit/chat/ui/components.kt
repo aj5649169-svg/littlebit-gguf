@@ -53,6 +53,7 @@ fun ModelSelectorPill(
 ) {
     Surface(
         onClick = onClick,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         shape = RoundedCornerShape(20.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
     ) {
@@ -80,7 +81,7 @@ fun ModelSelectorPill(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text(status, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            Text(status, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
             }
             Icon(
                 Icons.Default.KeyboardArrowDown,
@@ -139,11 +140,11 @@ private fun PillOption(
 }
 
 internal fun modelTitle(filename: String): String {
-    val stem = filename.substringBeforeLast('.', filename)
+    val stem = filename.removeSuffix(".gguf")
     val publisher = stem.substringBefore('_')
     val core = if ('_' in stem && stem.substringAfter('_').startsWith(publisher, true))
         stem.substringAfter('_') else stem
     val quant = Regex("(?i)[-_]((?:I?Q[0-9][A-Z0-9_]*|F16|BF16|F32))$").find(core)
     val family = core.substring(0, quant?.range?.first ?: core.length).replace(Regex("[-_]"), " ")
-    return listOfNotNull(family, quant?.groupValues?.get(1)).joinToString(" · ")
+    return family
 }
